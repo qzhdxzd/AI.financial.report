@@ -11,35 +11,43 @@ import akshare as ak
 
 # 导入自建模块
 from skills.tech_news_collector.collector import TechNewsCollector
+
+def run_collection():
+    collector = TechNewsCollector(use_mock=False)  # 根据需要设置
+    news = collector.collect()
+    return news
 from skills.market_analyzer.analyzer import MarketAnalyzer
 
 load_dotenv()
 
 
 def get_live_market_data():
-    """获取实时大盘数据"""
+    """获取实时大盘数据 - 适配新版akshare"""
     try:
-        # 上证指数
-        sh_index = ak.stock_zh_index_real("sh000001")
-        if sh_index is not None:
-            sh_close = sh_index['最新价'].iloc[-1]
-            sh_chg = sh_index['涨跌幅'].iloc[-1] if '涨跌幅' in sh_index.columns else 0
-        else:
-            sh_close, sh_chg = "--", 0
+        # 使用 stock_zh_a_spot 获取所有A股实时行情
+        df = ak.stock_zh_a_spot()
+        # 上证指数代码 sh000001
+        sh_row = df[df['代码'] == 'sh000001']
+        sz_row = df[df['代码'] == 'sz399001']
         
-        # 深证指数
-        sz_index = ak.stock_zh_index_real("sz399001")
-        if sz_index is not None:
-            sz_close = sz_index['最新价'].iloc[-1]
-            sz_chg = sz_index['涨跌幅'].iloc[-1] if '涨跌幅' in sz_index.columns else 0
-        else:
-            sz_close, sz_chg = "--", 0
-            
+        sh_close = sh_row['最新价'].values[0] if not sh_row.empty else "--"
+        sh_chg = sh_row['涨跌幅'].values[0] if not sh_row.empty else 0
+        sz_close = sz_row['最新价'].values[0] if not sz_row.empty else "--"
+        sz_chg = sz_row['涨跌幅'].values[0] if not sz_row.empty else 0
         return sh_close, sh_chg, sz_close, sz_chg
     except Exception as e:
         print(f"获取市场数据失败: {e}")
-        return "--", 0, "--", 0
-
+        # 回退到旧版接口尝试
+        try:
+            sh = ak.stock_zh_index_spot(symbol="sh000001")
+            sz = ak.stock_zh_index_spot(symbol="sz399001")
+            sh_close = sh['最新价'].iloc[0]
+            sh_chg = sh['涨跌幅'].iloc[0]
+            sz_close = sz['最新价'].iloc[0]
+            sz_chg = sz['涨跌幅'].iloc[0]
+            return sh_close, sh_chg, sz_close, sz_chg
+        except:
+            return "--", 0, "--", 0
 
 def run_daily_collection():
     """运行每日数据采集"""
