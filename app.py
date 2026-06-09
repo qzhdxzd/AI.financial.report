@@ -22,33 +22,18 @@ load_dotenv()
 
 
 def get_live_market_data():
-    """获取实时大盘数据 - 适配新版akshare"""
     try:
-        # 使用 stock_zh_a_spot 获取所有A股实时行情
+        # 尝试实时行情
         df = ak.stock_zh_a_spot()
-        # 上证指数代码 sh000001
-        sh_row = df[df['代码'] == 'sh000001']
-        sz_row = df[df['代码'] == 'sz399001']
-        
-        sh_close = sh_row['最新价'].values[0] if not sh_row.empty else "--"
-        sh_chg = sh_row['涨跌幅'].values[0] if not sh_row.empty else 0
-        sz_close = sz_row['最新价'].values[0] if not sz_row.empty else "--"
-        sz_chg = sz_row['涨跌幅'].values[0] if not sz_row.empty else 0
+        sh = df[df['代码'] == 'sh000001']
+        sz = df[df['代码'] == 'sz399001']
+        sh_close = sh['最新价'].iloc[0] if not sh.empty else "--"
+        sh_chg = sh['涨跌幅'].iloc[0] if not sh.empty else 0
+        sz_close = sz['最新价'].iloc[0] if not sz.empty else "--"
+        sz_chg = sz['涨跌幅'].iloc[0] if not sz.empty else 0
         return sh_close, sh_chg, sz_close, sz_chg
-    except Exception as e:
-        print(f"获取市场数据失败: {e}")
-        # 回退到旧版接口尝试
-        try:
-            sh = ak.stock_zh_index_spot(symbol="sh000001")
-            sz = ak.stock_zh_index_spot(symbol="sz399001")
-            sh_close = sh['最新价'].iloc[0]
-            sh_chg = sh['涨跌幅'].iloc[0]
-            sz_close = sz['最新价'].iloc[0]
-            sz_chg = sz['涨跌幅'].iloc[0]
-            return sh_close, sh_chg, sz_close, sz_chg
-        except:
-            return "--", 0, "--", 0
-
+    except:
+        return "--", 0, "--", 0
 def run_daily_collection():
     """运行每日数据采集"""
     collector = TechNewsCollector()
@@ -114,6 +99,13 @@ def generate_brief_report():
     
     return report
 
+def refresh_market():
+    sh_close, sh_chg, sz_close, sz_chg = get_live_market_data()
+    return [
+        ["上证指数", sh_close, f"{sh_chg:.2f}%" if isinstance(sh_chg, (int, float)) else "--%"],
+        ["深证指数", sz_close, f"{sz_chg:.2f}%" if isinstance(sz_chg, (int, float)) else "--%"]
+    ]
+
 
 def create_ui():
     with gr.Blocks(title="Claw 数字员工 - 每日股票简报", theme=gr.themes.Soft()) as demo:
@@ -143,6 +135,8 @@ def create_ui():
                     interactive=False
                 )
                 refresh_btn = gr.Button("🔄 刷新市场数据")
+                # 绑定按钮
+                refresh_btn.click(refresh_market, outputs=market_table)
             
             with gr.Column(scale=2):
                 gr.Markdown("### 📋 每日简报")
