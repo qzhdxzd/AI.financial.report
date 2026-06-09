@@ -1,8 +1,9 @@
 gradio>=4.44.0
 akshare
 pandas
-numpy
 requests
 beautifulsoup4
 lxml
 python-dotenv
+transformers
+torch

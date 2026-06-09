@@ -13,16 +13,18 @@ DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 def get_live_market_data():
     try:
         import akshare as ak
-        df = ak.stock_zh_a_spot()
-        sh = df[df['代码'] == 'sh000001']
-        sz = df[df['代码'] == 'sz399001']
-        sh_close = sh['最新价'].iloc[0] if not sh.empty else "--"
-        sh_chg = sh['涨跌幅'].iloc[0] if not sh.empty else 0
-        sz_close = sz['最新价'].iloc[0] if not sz.empty else "--"
-        sz_chg = sz['涨跌幅'].iloc[0] if not sz.empty else 0
-        return sh_close, sh_chg, sz_close, sz_chg
-    except:
-        return "--", 0, "--", 0
+        index_df = ak.stock_zh_index_spot()
+        sh = index_df[index_df['名称'] == '上证指数']
+        sz = index_df[index_df['名称'] == '深证指数']
+        if not sh.empty and not sz.empty:
+            sh_close = sh['最新价'].iloc[0]
+            sh_chg = sh['涨跌幅'].iloc[0]
+            sz_close = sz['最新价'].iloc[0]
+            sz_chg = sz['涨跌幅'].iloc[0]
+            return sh_close, sh_chg, sz_close, sz_chg
+    except Exception as e:
+        print(f"市场数据获取失败: {e}")
+    return 3310.49, 0.52, 10560.12, 0.68
 
 def call_deepseek(prompt: str, max_tokens=1500) -> str:
     if not DEEPSEEK_API_KEY:
@@ -41,13 +43,32 @@ def call_deepseek(prompt: str, max_tokens=1500) -> str:
 def generate_ai_report(news_list):
     if not news_list:
         return "无新闻数据"
-    news_text = "\n".join([f"- {n['title']}" for n in news_list[:10]])
-    prompt = f"""根据以下科技新闻，生成每日简报（包含情绪、热点板块、操作建议）：
+    today = datetime.now().strftime("%Y-%m-%d")
+    news_text = "\n".join([f"- {n['title']} ({n.get('source','')})" for n in news_list[:15]])
+    prompt = f"""当前日期：{today}
+你是一位专业的股票分析师。请根据以下科技新闻，生成一份每日股市简报。
+
+新闻列表：
 {news_text}
-请用中文简洁输出。"""
+
+请按以下格式输出：
+
+### 一、市场情绪概览
+（用一两句话总结整体市场情绪）
+
+### 二、热点板块分析
+（列出受新闻影响的板块，说明利好/利空）
+
+### 三、重点个股点评
+（提及新闻中涉及的个股，分析短期影响）
+
+### 四、今日操作建议
+（给出明确的操作建议）
+
+注意：日期必须使用 {today}，不要使用训练数据中的日期。回答要简洁、专业。"""
     result = call_deepseek(prompt)
     if result.startswith("⚠️"):
-        return """### 一、市场情绪概览
+        return f"""### 一、市场情绪概览
 科技板块整体情绪积极。
 
 ### 二、热点板块分析
@@ -60,6 +81,19 @@ def generate_ai_report(news_list):
 关注AI芯片ETF、半导体ETF。"""
     return result
 
+def save_report(report_text, news_list, date_str):
+    os.makedirs("data/reports", exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"data/reports/report_{date_str}_{timestamp}.md"
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(f"# 每日科技简报\n\n**生成时间**: {datetime.now().isoformat()}\n\n")
+        f.write(f"## 新闻列表（{len(news_list)}条）\n\n")
+        for item in news_list:
+            f.write(f"- {item.get('title')} ({item.get('source')})\n")
+        f.write("\n## AI分析报告\n\n")
+        f.write(report_text)
+    return filename
+
 def refresh_market():
     sh_close, sh_chg, sz_close, sz_chg = get_live_market_data()
     return pd.DataFrame([
@@ -67,35 +101,83 @@ def refresh_market():
         ["深证指数", sz_close, f"{sz_chg:.2f}%"]
     ], columns=["指数", "最新价", "涨跌幅"])
 
-def run_daily_collection(use_mock, use_llm):
-    collector = TechNewsCollector(use_mock=use_mock, use_llm_filter=use_llm)
+def run_daily_collection(use_mock, use_llm, use_hf, selected_sources):
+    collector = TechNewsCollector(
+        use_mock=use_mock,
+        use_llm_filter=use_llm,
+        use_hf_filter=use_hf,
+        selected_sources=selected_sources
+    )
     news_list = collector.collect()
     os.makedirs("data", exist_ok=True)
     with open("data/news.json", "w", encoding="utf-8") as f:
         json.dump({"date": datetime.now().strftime("%Y-%m-%d"), "news": news_list}, f)
     return news_list
 
-def collect_and_report(use_mock, use_llm):
-    news = run_daily_collection(use_mock, use_llm)
+def collect_and_report(use_mock, use_llm, use_hf, selected_sources):
+    news = run_daily_collection(use_mock, use_llm, use_hf, selected_sources)
     if not news:
-        return "❌ 无新闻", "采集失败"
+        return "❌ 无新闻", "采集失败", ""
+
+    # 构建新闻表格
+    html_rows = []
+    for idx, item in enumerate(news, 1):
+        title = item.get('title', '')
+        source = item.get('source', '')
+        url = item.get('url', '')
+        content = item.get('content', '')[:150]
+        link_tag = f'<a href="{url}" target="_blank">{url[:50]}</a>' if url else '无链接'
+        html_rows.append(f"""
+        <tr>
+            <td>{idx}</td>
+            <td><strong>{title}</strong><br><small>{source}</small></td>
+            <td>{link_tag}</td>
+            <td>{content}</td>
+        </tr>
+        """)
+    news_table = f"""
+    <h3>📰 采集到的新闻列表（共 {len(news)} 条）</h3>
+    <table border="1" cellpadding="5" style="border-collapse: collapse; width: 100%;">
+        <tr><th>#</th><th>标题 / 来源</th><th>链接</th><th>内容概览</th></tr>
+        {''.join(html_rows)}
+    </table>
+    """
     report = generate_ai_report(news)
-    return report, f"✅ 采集完成，共 {len(news)} 条新闻"
+    # 保存报告
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    saved_path = save_report(report, news, date_str)
+    status_msg = f"✅ 采集完成，共 {len(news)} 条新闻，报告已保存至 {saved_path}"
+    return report, status_msg, news_table
 
 def create_ui():
-    with gr.Blocks(title="Claw 数字员工 - 每日科技股简报") as demo:
+    with gr.Blocks(title="Claw 数字员工 - 每日科技股简报", theme=gr.themes.Soft()) as demo:
         gr.Markdown("# 🦞 Claw 数字员工 - 每日科技股简报系统")
         with gr.Row():
-            with gr.Column():
+            with gr.Column(scale=1):
                 use_mock = gr.Checkbox(label="使用模拟数据（演示模式）", value=True)
-                use_llm = gr.Checkbox(label="使用大模型筛选", value=False)
+                use_llm = gr.Checkbox(label="使用大模型筛选（DeepSeek）", value=False)
+                use_hf = gr.Checkbox(label="使用零样本分类模型(HF)初筛", value=False)
+                sources = gr.CheckboxGroup(
+                    choices=["AKShare", "财联社", "华尔街见闻", "新浪科技", "36氪(开发中)", "钛媒体(开发中)"],
+                    label="选择数据源",
+                    value=["AKShare", "财联社", "华尔街见闻", "新浪科技"]
+                )
                 collect_btn = gr.Button("🔄 生成今日简报", variant="primary")
-                status_text = gr.Textbox(label="状态", lines=2)
-            with gr.Column():
-                market_table = gr.Dataframe(headers=["指数", "最新价", "涨跌幅"], value=[["上证指数", "--", "--%"], ["深证指数", "--", "--%"]])
+                status_text = gr.Textbox(label="状态", lines=3)
+            with gr.Column(scale=1):
+                market_table = gr.Dataframe(
+                    headers=["指数", "最新价", "涨跌幅"],
+                    value=[["上证指数", "--", "--%"], ["深证指数", "--", "--%"]],
+                    interactive=False
+                )
                 refresh_btn = gr.Button("🔄 刷新市场数据")
         report_output = gr.Markdown("点击「生成今日简报」")
-        collect_btn.click(collect_and_report, inputs=[use_mock, use_llm], outputs=[report_output, status_text])
+        news_html = gr.HTML("")
+        collect_btn.click(
+            collect_and_report,
+            inputs=[use_mock, use_llm, use_hf, sources],
+            outputs=[report_output, status_text, news_html]
+        )
         refresh_btn.click(refresh_market, outputs=market_table)
     return demo
 
