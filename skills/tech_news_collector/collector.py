@@ -1,19 +1,12 @@
 #!/usr/bin/env python3
-"""
-科技财经新闻采集器 - Claw1
-支持多数据源 + 关键词初筛 + HF零样本模型 + 大模型精筛 + 相似度去重
-预留 prediction_score / impact_score 接口
-"""
-
 import json
 import os
 import hashlib
 import re
 import time
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict
 from difflib import SequenceMatcher
-
 import requests
 from bs4 import BeautifulSoup
 
@@ -23,36 +16,34 @@ try:
     AKSHARE_AVAILABLE = True
 except ImportError:
     AKSHARE_AVAILABLE = False
-    print("Warning: akshare 未安装")
 
-# DeepSeek API 配置
+# DeepSeek API
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 
 # Hugging Face 零样本分类器（全局懒加载）
-_zero_shot_classifier = None
+_zero_shot = None
 
-def get_zero_shot_classifier():
-    """懒加载零样本分类模型"""
-    global _zero_shot_classifier
-    if _zero_shot_classifier is None:
+def get_zero_shot():
+    global _zero_shot
+    if _zero_shot is None:
         try:
             from transformers import pipeline
-            print("正在加载零样本分类模型（首次加载需下载，约1.6GB）...")
-            _zero_shot_classifier = pipeline(
+            print("正在加载零样本分类模型...")
+            _zero_shot = pipeline(
                 "zero-shot-classification",
                 model="facebook/bart-large-mnli",
-                device=-1  # 使用CPU，可改为0使用GPU（如果有）
+                device=-1
             )
-            print("模型加载完成。")
+            print("HF模型加载成功")
         except Exception as e:
-            print(f"加载HF模型失败: {e}")
-            _zero_shot_classifier = False
-    return _zero_shot_classifier if _zero_shot_classifier is not False else None
+            print(f"HF模型加载失败: {e}")
+            _zero_shot = False
+    return _zero_shot if _zero_shot is not False else None
 
-def hf_tech_filter(title: str, content: str, threshold: float = 0.7) -> bool:
+def hf_is_tech(title: str, content: str, threshold: float = 0.6) -> bool:
     """使用零样本分类判断是否为科技新闻"""
-    classifier = get_zero_shot_classifier()
+    classifier = get_zero_shot()
     if classifier is None:
         return False
     candidate_labels = ["科技", "财经", "娱乐", "体育", "政治"]
@@ -60,24 +51,14 @@ def hf_tech_filter(title: str, content: str, threshold: float = 0.7) -> bool:
     result = classifier(text, candidate_labels)
     return result['labels'][0] == "科技" and result['scores'][0] > threshold
 
-# ==================== 科技关键词库（用于初筛） ====================
-TECH_KEYWORDS = [
-    "AI", "人工智能", "大模型", "深度学习", "机器学习", "神经网络", "自然语言",
-    "芯片", "半导体", "集成电路", "CPU", "GPU", "NPU", "FPGA", "ASIC",
-    "算力", "云计算", "边缘计算", "数据中心", "服务器", "光模块",
-    "自动驾驶", "无人驾驶", "智能驾驶", "机器人", "具身智能", "工业机器人",
-    "新能源车", "电动车", "动力电池", "固态电池", "燃料电池", "储能",
-    "5G", "6G", "通信", "物联网", "车联网",
-    "英伟达", "NVIDIA", "AMD", "Intel", "英特尔", "华为", "中芯国际",
-    "台积电", "腾讯", "阿里", "百度", "字节跳动", "OpenAI", "ChatGPT",
-    "Copilot", "Gemini", "Claude", "DeepSeek"
-]
+# 辅助函数
+def is_similar(t1, t2, thresh=0.85):
+    return SequenceMatcher(None, t1, t2).ratio() > thresh
 
-# ==================== 辅助函数 ====================
-def is_similar(title1: str, title2: str, threshold: float = 0.85) -> bool:
-    return SequenceMatcher(None, title1, title2).ratio() > threshold
+def clean_text(text):
+    return re.sub(r'\s+', ' ', text or '').strip()
 
-def call_deepseek(prompt: str, max_tokens: int = 80) -> Optional[str]:
+def call_deepseek(prompt: str, max_tokens=80):
     if not DEEPSEEK_API_KEY:
         return None
     headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
@@ -92,21 +73,17 @@ def call_deepseek(prompt: str, max_tokens: int = 80) -> Optional[str]:
         resp = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=10)
         if resp.status_code == 200:
             return resp.json()["choices"][0]["message"]["content"].strip()
-        else:
-            print(f"API 错误 {resp.status_code}")
-            return None
-    except Exception as e:
-        print(f"API 异常: {e}")
-        return None
+    except:
+        pass
+    return None
 
-def llm_classify_news(title: str, content: str) -> tuple:
-    if not DEEPSEEK_API_KEY:
-        return (False, "", "neutral")
-    prompt = f"""判断以下新闻是否与科技相关（包括AI、芯片、半导体、机器人、新能源、自动驾驶、科技公司财报、技术突破、行业政策）。
+def deepseek_classify(title: str, content: str):
+    """返回 (is_tech, category, sentiment)"""
+    prompt = f"""判断以下新闻是否与科技相关（AI、芯片、半导体、机器人、新能源、自动驾驶等）。
 只输出JSON：{{"is_tech": true/false, "category": "领域名", "sentiment": "positive/negative/neutral"}}
-新闻标题：{title}
-新闻内容：{content[:300]}"""
-    result = call_deepseek(prompt, max_tokens=80)
+标题：{title}
+内容：{content[:300]}"""
+    result = call_deepseek(prompt)
     if not result:
         return (False, "", "neutral")
     try:
@@ -115,265 +92,177 @@ def llm_classify_news(title: str, content: str) -> tuple:
     except:
         return (False, "", "neutral")
 
-def keyword_filter(news: Dict) -> bool:
-    title = news.get('title', '')
-    content = news.get('content', '')
-    full_text = f"{title} {content}".lower()
-    return any(kw.lower() in full_text for kw in TECH_KEYWORDS)
-
-def clean_text(text: str) -> str:
-    if not text:
-        return ""
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
-
-# ==================== 数据源采集函数 ====================
-def fetch_akshare_news(stock_codes: List[str]) -> List[Dict]:
+# ---------------------------- 数据源采集 ----------------------------
+def fetch_akshare(stocks):
     if not AKSHARE_AVAILABLE:
         return []
-    all_news = []
-    for code in stock_codes:
+    news = []
+    for code in stocks:
         try:
             df = ak.stock_news_em(symbol=code)
             if df is not None and not df.empty:
                 for _, row in df.iterrows():
-                    news = {
+                    news.append({
                         "title": clean_text(row.get('title', '')),
                         "content": clean_text(row.get('content', ''))[:500],
                         "timestamp": row.get('publish_time', datetime.now().isoformat()),
                         "source": "AKShare",
-                        "url": row.get('url', ''),
-                    }
-                    all_news.append(news)
-            time.sleep(0.5)
-        except Exception as e:
-            print(f"AKShare 采集 {code} 失败: {e}")
-    return all_news
+                        "url": row.get('url', '')
+                    })
+            time.sleep(0.3)
+        except:
+            pass
+    return news
 
-def fetch_cls_telegraph() -> List[Dict]:
+def fetch_cls():
     url = "https://www.cls.cn/telegraph"
-    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        resp.encoding = 'utf-8'
-        soup = BeautifulSoup(resp.text, 'html.parser')
+        soup = BeautifulSoup(requests.get(url, timeout=10).text, 'html.parser')
         items = soup.select('.telegraph-item')
-        news_list = []
-        for item in items[:30]:
-            title_elem = item.select_one('.title')
-            if title_elem:
-                title = clean_text(title_elem.get_text())
-                news_list.append({
-                    "title": title,
-                    "content": title,
-                    "timestamp": datetime.now().isoformat(),
-                    "source": "财联社",
-                    "url": ""
-                })
-        return news_list
-    except Exception as e:
-        print(f"财联社采集失败: {e}")
+        return [{
+            "title": clean_text(t.select_one('.title').get_text()),
+            "content": "",
+            "timestamp": datetime.now().isoformat(),
+            "source": "财联社",
+            "url": ""
+        } for t in items[:30] if t.select_one('.title')]
+    except:
         return []
 
-def fetch_wallstreetcn_live() -> List[Dict]:
+def fetch_wallstreetcn():
     url = "https://api-prod.wallstreetcn.com/apiv1/content/lives?channel=global&limit=30"
-    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://wallstreetcn.com/"}
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        data = resp.json()
-        items = data.get('data', {}).get('items', [])
-        news_list = []
-        for item in items:
-            content = item.get('content_text', '')
-            if content:
-                news_list.append({
-                    "title": clean_text(content[:100]),
-                    "content": clean_text(content),
-                    "timestamp": item.get('created_at', datetime.now().isoformat()),
-                    "source": "华尔街见闻",
-                    "url": f"https://wallstreetcn.com/live/{item.get('id', '')}"
-                })
-        return news_list
-    except Exception as e:
-        print(f"华尔街见闻采集失败: {e}")
+        data = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}).json()
+        return [{
+            "title": clean_text(item.get('content_text', '')[:100]),
+            "content": clean_text(item.get('content_text', '')),
+            "timestamp": item.get('created_at', datetime.now().isoformat()),
+            "source": "华尔街见闻",
+            "url": f"https://wallstreetcn.com/live/{item.get('id','')}"
+        } for item in data.get('data', {}).get('items', []) if item.get('content_text')]
+    except:
         return []
 
-def fetch_sina_news() -> List[Dict]:
+def fetch_sina():
     url = "https://finance.sina.com.cn/tech/"
-    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        resp.encoding = 'utf-8'
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        news_list = []
-        for link in soup.select('a[href*="/tech/"]')[:20]:
-            title = clean_text(link.get_text())
-            if title and len(title) > 5:
-                news_list.append({
-                    "title": title,
-                    "content": title,
-                    "timestamp": datetime.now().isoformat(),
-                    "source": "新浪科技",
-                    "url": link.get('href', '')
-                })
-        return news_list
-    except Exception as e:
-        print(f"新浪科技采集失败: {e}")
+        soup = BeautifulSoup(requests.get(url, timeout=10).text, 'html.parser')
+        return [{
+            "title": clean_text(a.get_text()),
+            "content": "",
+            "timestamp": datetime.now().isoformat(),
+            "source": "新浪科技",
+            "url": a.get('href', '')
+        } for a in soup.select('a[href*="/tech/"]')[:20] if len(clean_text(a.get_text())) > 5]
+    except:
         return []
 
-# 可扩展的数据源（预留，UI中可选）
-def fetch_36kr_news():
-    # 示例：可加入36氪RSS解析
-    return []
-
-def fetch_tmtpost_news():
-    return []
-
-# ==================== 主采集器类 ====================
+# ---------------------------- 主采集器 ----------------------------
 class TechNewsCollector:
-    def __init__(self, use_mock: bool = False, use_llm_filter: bool = True,
-                 use_hf_filter: bool = False, selected_sources: List[str] = None,
-                 **kwargs):
+    def __init__(self, use_mock=False, use_llm_filter=True, selected_sources=None):
         self.use_mock = use_mock
-        self.use_llm_filter = use_llm_filter
-        self.use_hf_filter = use_hf_filter
-        self.selected_sources = selected_sources or ["AKShare", "财联社", "华尔街见闻", "新浪科技"]
-        self.tech_stocks = ['000977', '002230', '300750', '002475', '300308', '688981', '002415', '000063']
+        self.use_llm_filter = use_llm_filter  # DeepSeek 精筛
+        self.sources = selected_sources or ["AKShare", "财联社", "华尔街见闻", "新浪科技"]
 
-    def collect_from_all_sources(self) -> List[Dict]:
-        all_news = []
-        if "AKShare" in self.selected_sources:
-            print("采集 AKShare...")
-            all_news.extend(fetch_akshare_news(self.tech_stocks))
-        if "财联社" in self.selected_sources:
-            print("采集财联社...")
-            all_news.extend(fetch_cls_telegraph())
-        if "华尔街见闻" in self.selected_sources:
-            print("采集华尔街见闻...")
-            all_news.extend(fetch_wallstreetcn_live())
-        if "新浪科技" in self.selected_sources:
-            print("采集新浪科技...")
-            all_news.extend(fetch_sina_news())
-        # 扩展数据源
-        if "36氪" in self.selected_sources:
-            all_news.extend(fetch_36kr_news())
-        if "钛媒体" in self.selected_sources:
-            all_news.extend(fetch_tmtpost_news())
-        return all_news
-
-    def clean_news(self, news: Dict, category: str = "", sentiment: str = "neutral") -> Dict:
-        title = news.get('title', '')
-        content = news.get('content', '')
-        full_text = f"{title} {content}"
-        unique_str = f"{title}{news.get('timestamp', '')}{news.get('source', '')}"
-        news_id = hashlib.md5(unique_str.encode()).hexdigest()[:16]
-        return {
-            "id": news_id,
-            "timestamp": news.get('timestamp', datetime.now().isoformat()),
-            "source": news.get('source', '未知'),
-            "title": title,
-            "content": content[:500],
-            "url": news.get('url', ''),
-            "stock_mentioned": self._extract_stocks(full_text),
-            "is_fact": self._is_factual(full_text),
-            "predictive_sentences": self._extract_predictive(full_text),
-            "tech_category": category,
-            "tech_sentiment": sentiment,
-            "prediction_score": 0.0,   # 预留给Claw2的打分接口
-            "impact_score": 0.0
-        }
-
-    def _extract_stocks(self, text: str) -> List[str]:
-        codes = re.findall(r'\b[0-9]{6}\b', text)
-        names = ['英伟达', 'AMD', '英特尔', '华为', '腾讯', '阿里', '中芯国际']
-        found = [n for n in names if n in text]
-        return list(set(codes + found))
-
-    def _is_factual(self, text: str) -> bool:
-        return bool(re.search(r'\d+%|\d+亿|同比增长|公告|合同|中标', text))
-
-    def _extract_predictive(self, text: str) -> List[str]:
-        keywords = ['预计', '有望', '可能', '将', '预期']
-        sents = re.split(r'[。；！]', text)
-        return [s.strip() for s in sents if any(k in s for k in keywords) and len(s) > 5]
-
-    def get_mock_news(self) -> List[Dict]:
+    def get_mock_news(self):
         now = datetime.now().isoformat()
-        return [
-            {"id": "mock1", "timestamp": now, "source": "模拟数据", "title": "英伟达发布新一代AI芯片H200，算力提升3倍", "content": "英伟达今日宣布推出新一代AI加速卡H200...", "url": "", "stock_mentioned": ["英伟达"], "is_fact": True, "predictive_sentences": [], "tech_category": "AI芯片", "tech_sentiment": "positive", "prediction_score": 0.0, "impact_score": 0.0},
-            {"id": "mock2", "timestamp": now, "source": "模拟数据", "title": "中芯国际季度营收超预期，半导体行业回暖", "content": "中芯国际公告显示，三季度营收同比增长34%...", "url": "", "stock_mentioned": ["中芯国际"], "is_fact": True, "predictive_sentences": [], "tech_category": "半导体", "tech_sentiment": "positive", "prediction_score": 0.0, "impact_score": 0.0},
-            {"id": "mock3", "timestamp": now, "source": "模拟数据", "title": "工信部：加快推动人工智能与实体经济深度融合", "content": "工信部相关负责人表示，将出台更多政策支持AI产业发展...", "url": "", "stock_mentioned": ["AI"], "is_fact": True, "predictive_sentences": [], "tech_category": "AI", "tech_sentiment": "positive", "prediction_score": 0.0, "impact_score": 0.0}
-        ]
+        return [{
+            "id": f"mock{i}", "timestamp": now, "source": "模拟数据",
+            "title": t, "content": c, "url": "", "stock_mentioned": s,
+            "is_fact": True, "predictive_sentences": [], "tech_category": cat,
+            "tech_sentiment": "positive", "prediction_score": 0.0, "impact_score": 0.0
+        } for i, (t, c, s, cat) in enumerate([
+            ("英伟达发布新一代AI芯片H200，算力提升3倍", "英伟达今日宣布推出新一代AI加速卡H200...", ["英伟达"], "AI芯片"),
+            ("中芯国际季度营收超预期，半导体行业回暖", "中芯国际公告显示，三季度营收同比增长34%...", ["中芯国际"], "半导体"),
+            ("工信部：加快推动人工智能与实体经济深度融合", "工信部相关负责人表示，将出台更多政策支持AI产业发展...", ["AI"], "AI")
+        ], 1)]
 
-    def collect(self) -> List[Dict]:
+    def collect(self):
         if self.use_mock:
-            print("使用模拟数据模式")
+            print("使用模拟数据")
             return self.get_mock_news()
 
-        print("开始采集真实新闻...")
-        raw_news = self.collect_from_all_sources()
-        print(f"原始采集总数: {len(raw_news)}")
+        # 1. 多源采集
+        all_news = []
+        if "AKShare" in self.sources: all_news.extend(fetch_akshare(['000977','002230','300750']))
+        if "财联社" in self.sources: all_news.extend(fetch_cls())
+        if "华尔街见闻" in self.sources: all_news.extend(fetch_wallstreetcn())
+        if "新浪科技" in self.sources: all_news.extend(fetch_sina())
+        print(f"原始采集: {len(all_news)} 条")
 
-        # 1. 关键词预筛选
-        tech_candidates = [n for n in raw_news if keyword_filter(n)]
-        print(f"关键词预筛选后: {len(tech_candidates)} 条")
+        if not all_news:
+            return self.get_mock_news()
 
-        # 2. HF 零样本模型筛选（可选）
-        if self.use_hf_filter:
-            print("使用HF零样本模型进行精筛...")
-            hf_filtered = []
-            for n in tech_candidates:
-                if hf_tech_filter(n.get('title',''), n.get('content','')):
-                    hf_filtered.append(n)
-            tech_candidates = hf_filtered
-            print(f"HF模型筛选后: {len(tech_candidates)} 条")
-
-        if not tech_candidates:
-            print("预筛结果为空")
-            return []
-
-        # 3. 大模型精筛（可选）
-        if self.use_llm_filter and DEEPSEEK_API_KEY:
-            print("使用大模型精筛...")
-            llm_tech = []
-            total = len(tech_candidates)
-            for idx, n in enumerate(tech_candidates):
-                print(f"LLM进度: {idx+1}/{total}")
-                is_tech, cat, sent = llm_classify_news(n.get('title',''), n.get('content','')[:300])
-                if is_tech:
-                    llm_tech.append(self.clean_news(n, cat, sent))
-            if llm_tech:
-                final_news = llm_tech
-                print(f"大模型筛选得到 {len(final_news)} 条")
-            else:
-                print("大模型未识别到科技新闻，使用关键词结果")
-                final_news = [self.clean_news(n, "科技", "neutral") for n in tech_candidates]
+        # 2. HF 初筛（零样本分类）
+        hf_pass = []
+        hf_model = get_zero_shot()
+        if hf_model is not None:
+            print("使用 HF 模型进行初筛...")
+            for idx, news in enumerate(all_news):
+                title = news['title']
+                content = news.get('content', '')
+                if hf_is_tech(title, content, threshold=0.6):
+                    hf_pass.append(news)
+            print(f"HF 初筛通过: {len(hf_pass)} 条")
         else:
-            final_news = [self.clean_news(n, "科技", "neutral") for n in tech_candidates]
+            # HF 不可用时的回退：使用简单关键词（保底）
+            print("HF 不可用，使用关键词保底筛选")
+            keywords = ["AI", "芯片", "半导体", "机器人", "英伟达", "中芯", "自动驾驶", "算力"]
+            hf_pass = [n for n in all_news if any(k in n['title'] for k in keywords)]
+            print(f"关键词保底筛选: {len(hf_pass)} 条")
 
-        # 4. 相似度去重
+        if not hf_pass:
+            print("初筛无结果，返回模拟数据")
+            return self.get_mock_news()
+
+        # 3. DeepSeek 精筛
+        final_news = []
+        if self.use_llm_filter and DEEPSEEK_API_KEY:
+            print("使用 DeepSeek 精筛...")
+            for idx, news in enumerate(hf_pass):
+                print(f"DeepSeek 进度: {idx+1}/{len(hf_pass)}")
+                is_tech, cat, sent = deepseek_classify(news['title'], news.get('content','')[:300])
+                if is_tech:
+                    uid = hashlib.md5(f"{news['title']}{news.get('source','')}".encode()).hexdigest()[:16]
+                    final_news.append({
+                        "id": uid,
+                        "timestamp": news['timestamp'],
+                        "source": news['source'],
+                        "title": news['title'],
+                        "content": news['content'][:500],
+                        "url": news['url'],
+                        "stock_mentioned": [],
+                        "is_fact": False,
+                        "predictive_sentences": [],
+                        "tech_category": cat,
+                        "tech_sentiment": sent,
+                        "prediction_score": 0.0,
+                        "impact_score": 0.0
+                    })
+        else:
+            # 无 DeepSeek 时，直接使用 HF 结果
+            for news in hf_pass:
+                uid = hashlib.md5(f"{news['title']}{news.get('source','')}".encode()).hexdigest()[:16]
+                final_news.append({
+                    "id": uid,
+                    "timestamp": news['timestamp'],
+                    "source": news['source'],
+                    "title": news['title'],
+                    "content": news['content'][:500],
+                    "url": news['url'],
+                    "stock_mentioned": [],
+                    "is_fact": False,
+                    "predictive_sentences": [],
+                    "tech_category": "科技",
+                    "tech_sentiment": "neutral",
+                    "prediction_score": 0.0,
+                    "impact_score": 0.0
+                })
+
+        # 4. 去重
         unique = []
         for n in final_news:
             if not any(is_similar(n['title'], u['title']) for u in unique):
                 unique.append(n)
         print(f"最终科技新闻: {len(unique)} 条")
-        return unique
-
-def main():
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--output', '-o', default='data/news.json')
-    parser.add_argument('--mock', action='store_true')
-    parser.add_argument('--no-llm', action='store_true')
-    parser.add_argument('--hf', action='store_true', help='启用HF零样本筛选')
-    args = parser.parse_args()
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    collector = TechNewsCollector(use_mock=args.mock, use_llm_filter=not args.no_llm, use_hf_filter=args.hf)
-    news_list = collector.collect()
-    output = {"date": datetime.now().strftime("%Y-%m-%d"), "timestamp": datetime.now().isoformat(), "total": len(news_list), "news": news_list}
-    with open(args.output, 'w', encoding='utf-8') as f:
-        json.dump(output, f, ensure_ascii=False, indent=2)
-    print(f"✅ 保存至 {args.output}")
-
-if __name__ == "__main__":
-    main()
+        return unique if unique else self.get_mock_news()
