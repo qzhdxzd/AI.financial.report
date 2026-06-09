@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-import json, os
+import json
+import os
 from datetime import datetime
 import gradio as gr
 import pandas as pd
@@ -10,7 +11,6 @@ DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 
 def get_live_market_data():
-    """使用 stock_zh_a_spot 获取指数，失败则返回默认值"""
     try:
         import akshare as ak
         df = ak.stock_zh_a_spot()
@@ -21,16 +21,14 @@ def get_live_market_data():
         sz_close = sz['最新价'].iloc[0] if not sz.empty else "--"
         sz_chg = sz['涨跌幅'].iloc[0] if not sz.empty else 0
         return sh_close, sh_chg, sz_close, sz_chg
-    except Exception as e:
-        print(f"获取市场数据失败: {e}")
-        # 返回示例数据
-        return 3310.49, 0.52, 10560.12, 0.68
+    except:
+        return "--", 0, "--", 0
 
 def call_deepseek(prompt: str, max_tokens=1500) -> str:
     if not DEEPSEEK_API_KEY:
         return "⚠️ 未配置 API Key"
     headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens, "temperature": 0.7}
+    payload = {"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens}
     try:
         resp = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=30)
         if resp.status_code == 200:
@@ -49,7 +47,6 @@ def generate_ai_report(news_list):
 请用中文简洁输出。"""
     result = call_deepseek(prompt)
     if result.startswith("⚠️"):
-        # 降级模板
         return """### 一、市场情绪概览
 科技板块整体情绪积极。
 
@@ -71,8 +68,7 @@ def refresh_market():
     ], columns=["指数", "最新价", "涨跌幅"])
 
 def run_daily_collection(use_mock, use_llm):
-    # 忽略 use_llm，因为 collector 已默认启用大模型筛选（但 use_mock 优先）
-    collector = TechNewsCollector(use_mock=use_mock)
+    collector = TechNewsCollector(use_mock=use_mock, use_llm_filter=use_llm)
     news_list = collector.collect()
     os.makedirs("data", exist_ok=True)
     with open("data/news.json", "w", encoding="utf-8") as f:
@@ -91,8 +87,8 @@ def create_ui():
         gr.Markdown("# 🦞 Claw 数字员工 - 每日科技股简报系统")
         with gr.Row():
             with gr.Column():
-                use_mock = gr.Checkbox(label="使用模拟数据", value=True)
-                use_llm = gr.Checkbox(label="使用大模型筛选（忽略，已默认）", value=False, visible=False)
+                use_mock = gr.Checkbox(label="使用模拟数据（演示模式）", value=True)
+                use_llm = gr.Checkbox(label="使用大模型筛选", value=False)
                 collect_btn = gr.Button("🔄 生成今日简报", variant="primary")
                 status_text = gr.Textbox(label="状态", lines=2)
             with gr.Column():
