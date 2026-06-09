@@ -10,14 +10,12 @@ from difflib import SequenceMatcher
 import requests
 from bs4 import BeautifulSoup
 
-# 尝试导入 akshare
 try:
     import akshare as ak
     AKSHARE_AVAILABLE = True
 except ImportError:
     AKSHARE_AVAILABLE = False
 
-# DeepSeek API
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 
@@ -42,7 +40,6 @@ def get_zero_shot():
     return _zero_shot if _zero_shot is not False else None
 
 def hf_is_tech(title: str, content: str, threshold: float = 0.6) -> bool:
-    """使用零样本分类判断是否为科技新闻"""
     classifier = get_zero_shot()
     if classifier is None:
         return False
@@ -51,7 +48,6 @@ def hf_is_tech(title: str, content: str, threshold: float = 0.6) -> bool:
     result = classifier(text, candidate_labels)
     return result['labels'][0] == "科技" and result['scores'][0] > threshold
 
-# 辅助函数
 def is_similar(t1, t2, thresh=0.85):
     return SequenceMatcher(None, t1, t2).ratio() > thresh
 
@@ -78,7 +74,6 @@ def call_deepseek(prompt: str, max_tokens=80):
     return None
 
 def deepseek_classify(title: str, content: str):
-    """返回 (is_tech, category, sentiment)"""
     prompt = f"""判断以下新闻是否与科技相关（AI、芯片、半导体、机器人、新能源、自动驾驶等）。
 只输出JSON：{{"is_tech": true/false, "category": "领域名", "sentiment": "positive/negative/neutral"}}
 标题：{title}
@@ -159,9 +154,10 @@ def fetch_sina():
 
 # ---------------------------- 主采集器 ----------------------------
 class TechNewsCollector:
-    def __init__(self, use_mock=False, use_llm_filter=True, selected_sources=None):
+    def __init__(self, use_mock=False, use_llm_filter=True, use_hf_filter=False, selected_sources=None):
         self.use_mock = use_mock
-        self.use_llm_filter = use_llm_filter  # DeepSeek 精筛
+        self.use_llm_filter = use_llm_filter
+        self.use_hf_filter = use_hf_filter
         self.sources = selected_sources or ["AKShare", "财联社", "华尔街见闻", "新浪科技"]
 
     def get_mock_news(self):
@@ -193,34 +189,39 @@ class TechNewsCollector:
         if not all_news:
             return self.get_mock_news()
 
-        # 2. HF 初筛（零样本分类）
-        hf_pass = []
-        hf_model = get_zero_shot()
-        if hf_model is not None:
-            print("使用 HF 模型进行初筛...")
-            for idx, news in enumerate(all_news):
-                title = news['title']
-                content = news.get('content', '')
-                if hf_is_tech(title, content, threshold=0.6):
-                    hf_pass.append(news)
-            print(f"HF 初筛通过: {len(hf_pass)} 条")
+        # 2. 初筛：优先使用HF零样本，否则用关键词保底
+        candidates = []
+        if self.use_hf_filter:
+            hf_model = get_zero_shot()
+            if hf_model is not None:
+                print("使用 HF 模型进行初筛...")
+                for idx, news in enumerate(all_news):
+                    title = news['title']
+                    content = news.get('content', '')
+                    if hf_is_tech(title, content, threshold=0.6):
+                        candidates.append(news)
+                print(f"HF 初筛通过: {len(candidates)} 条")
+            else:
+                print("HF不可用，使用关键词保底")
+                keywords = ["AI", "芯片", "半导体", "机器人", "英伟达", "中芯", "自动驾驶", "算力"]
+                candidates = [n for n in all_news if any(k in n['title'] for k in keywords)]
+                print(f"关键词保底筛选: {len(candidates)} 条")
         else:
-            # HF 不可用时的回退：使用简单关键词（保底）
-            print("HF 不可用，使用关键词保底筛选")
+            # 如果未启用 HF 筛选，可以不做初筛，直接进入下一步，但为了效率，仍用简单关键词过滤
             keywords = ["AI", "芯片", "半导体", "机器人", "英伟达", "中芯", "自动驾驶", "算力"]
-            hf_pass = [n for n in all_news if any(k in n['title'] for k in keywords)]
-            print(f"关键词保底筛选: {len(hf_pass)} 条")
+            candidates = [n for n in all_news if any(k in n['title'] for k in keywords)]
+            print(f"关键词预筛: {len(candidates)} 条")
 
-        if not hf_pass:
+        if not candidates:
             print("初筛无结果，返回模拟数据")
             return self.get_mock_news()
 
-        # 3. DeepSeek 精筛
+        # 3. DeepSeek 精筛（可选）
         final_news = []
         if self.use_llm_filter and DEEPSEEK_API_KEY:
             print("使用 DeepSeek 精筛...")
-            for idx, news in enumerate(hf_pass):
-                print(f"DeepSeek 进度: {idx+1}/{len(hf_pass)}")
+            for idx, news in enumerate(candidates):
+                print(f"DeepSeek 进度: {idx+1}/{len(candidates)}")
                 is_tech, cat, sent = deepseek_classify(news['title'], news.get('content','')[:300])
                 if is_tech:
                     uid = hashlib.md5(f"{news['title']}{news.get('source','')}".encode()).hexdigest()[:16]
@@ -240,8 +241,8 @@ class TechNewsCollector:
                         "impact_score": 0.0
                     })
         else:
-            # 无 DeepSeek 时，直接使用 HF 结果
-            for news in hf_pass:
+            # 无 DeepSeek，直接使用初筛结果
+            for news in candidates:
                 uid = hashlib.md5(f"{news['title']}{news.get('source','')}".encode()).hexdigest()[:16]
                 final_news.append({
                     "id": uid,
