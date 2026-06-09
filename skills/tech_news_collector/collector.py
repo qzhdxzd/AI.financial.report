@@ -19,35 +19,32 @@ except ImportError:
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 
-# Hugging Face 零样本分类器（全局懒加载）
-_zero_shot = None
+# 预设高质量模拟新闻（最终保底 + 演示模式）
+FALLBACK_NEWS = [
+    {
+        "title": "英伟达发布新一代AI芯片H200，算力提升3倍",
+        "content": "英伟达今日宣布推出新一代AI加速卡H200，预计将带动全球AI算力需求大幅增长。",
+        "source": "模拟数据",
+        "category": "AI芯片",
+        "sentiment": "positive"
+    },
+    {
+        "title": "中芯国际季度营收超预期，半导体行业回暖",
+        "content": "中芯国际公告显示，三季度营收同比增长34%，超出市场预期，行业景气度回升。",
+        "source": "模拟数据",
+        "category": "半导体",
+        "sentiment": "positive"
+    },
+    {
+        "title": "工信部：加快推动人工智能与实体经济深度融合",
+        "content": "工信部相关负责人表示，下一步将出台更多政策支持AI产业发展，推动大模型在工业场景落地。",
+        "source": "模拟数据",
+        "category": "AI",
+        "sentiment": "positive"
+    }
+]
 
-def get_zero_shot():
-    global _zero_shot
-    if _zero_shot is None:
-        try:
-            from transformers import pipeline
-            print("正在加载零样本分类模型...")
-            _zero_shot = pipeline(
-                "zero-shot-classification",
-                model="facebook/bart-large-mnli",
-                device=-1
-            )
-            print("HF模型加载成功")
-        except Exception as e:
-            print(f"HF模型加载失败: {e}")
-            _zero_shot = False
-    return _zero_shot if _zero_shot is not False else None
-
-def hf_is_tech(title: str, content: str, threshold: float = 0.6) -> bool:
-    classifier = get_zero_shot()
-    if classifier is None:
-        return False
-    candidate_labels = ["科技", "财经", "娱乐", "体育", "政治"]
-    text = f"{title}。{content}"[:500]
-    result = classifier(text, candidate_labels)
-    return result['labels'][0] == "科技" and result['scores'][0] > threshold
-
+# ==================== 辅助函数 ====================
 def is_similar(t1, t2, thresh=0.85):
     return SequenceMatcher(None, t1, t2).ratio() > thresh
 
@@ -74,6 +71,7 @@ def call_deepseek(prompt: str, max_tokens=80):
     return None
 
 def deepseek_classify(title: str, content: str):
+    """返回 (is_tech, category, sentiment)"""
     prompt = f"""判断以下新闻是否与科技相关（AI、芯片、半导体、机器人、新能源、自动驾驶等）。
 只输出JSON：{{"is_tech": true/false, "category": "领域名", "sentiment": "positive/negative/neutral"}}
 标题：{title}
@@ -87,7 +85,43 @@ def deepseek_classify(title: str, content: str):
     except:
         return (False, "", "neutral")
 
-# ---------------------------- 数据源采集 ----------------------------
+# ==================== 关键词保底库 ====================
+KEYWORDS_FALLBACK = ["AI", "芯片", "半导体", "机器人", "英伟达", "中芯", "自动驾驶", "算力", "大模型", "GPU"]
+
+def keyword_filter(news: Dict) -> bool:
+    text = f"{news.get('title', '')} {news.get('content', '')}".lower()
+    return any(kw.lower() in text for kw in KEYWORDS_FALLBACK)
+
+# ==================== Hugging Face 零样本模型 ====================
+_zero_shot = None
+
+def get_zero_shot():
+    global _zero_shot
+    if _zero_shot is None:
+        try:
+            from transformers import pipeline
+            print("正在加载零样本分类模型...")
+            _zero_shot = pipeline(
+                "zero-shot-classification",
+                model="facebook/bart-large-mnli",
+                device=-1
+            )
+            print("HF模型加载成功")
+        except Exception as e:
+            print(f"HF模型加载失败（将使用关键词筛选）: {e}")
+            _zero_shot = False
+    return _zero_shot if _zero_shot is not False else None
+
+def hf_is_tech(title: str, content: str, threshold: float = 0.6) -> bool:
+    classifier = get_zero_shot()
+    if classifier is None:
+        return False
+    candidate_labels = ["科技", "财经", "娱乐", "体育", "政治"]
+    text = f"{title}。{content}"[:500]
+    result = classifier(text, candidate_labels)
+    return result['labels'][0] == "科技" and result['scores'][0] > threshold
+
+# ==================== 数据源采集 ====================
 def fetch_akshare(stocks):
     if not AKSHARE_AVAILABLE:
         return []
@@ -152,7 +186,7 @@ def fetch_sina():
     except:
         return []
 
-# ---------------------------- 主采集器 ----------------------------
+# ==================== 主采集器类 ====================
 class TechNewsCollector:
     def __init__(self, use_mock=False, use_llm_filter=True, use_hf_filter=False, selected_sources=None):
         self.use_mock = use_mock
@@ -160,69 +194,76 @@ class TechNewsCollector:
         self.use_hf_filter = use_hf_filter
         self.sources = selected_sources or ["AKShare", "财联社", "华尔街见闻", "新浪科技"]
 
-    def get_mock_news(self):
+    def _get_fallback_news(self):
+        """返回保底模拟新闻"""
         now = datetime.now().isoformat()
         return [{
-            "id": f"mock{i}", "timestamp": now, "source": "模拟数据",
-            "title": t, "content": c, "url": "", "stock_mentioned": s,
-            "is_fact": True, "predictive_sentences": [], "tech_category": cat,
-            "tech_sentiment": "positive", "prediction_score": 0.0, "impact_score": 0.0
-        } for i, (t, c, s, cat) in enumerate([
-            ("英伟达发布新一代AI芯片H200，算力提升3倍", "英伟达今日宣布推出新一代AI加速卡H200...", ["英伟达"], "AI芯片"),
-            ("中芯国际季度营收超预期，半导体行业回暖", "中芯国际公告显示，三季度营收同比增长34%...", ["中芯国际"], "半导体"),
-            ("工信部：加快推动人工智能与实体经济深度融合", "工信部相关负责人表示，将出台更多政策支持AI产业发展...", ["AI"], "AI")
-        ], 1)]
+            "id": f"fallback_{i}",
+            "timestamp": now,
+            "source": item["source"],
+            "title": item["title"],
+            "content": item["content"],
+            "url": "",
+            "stock_mentioned": [],
+            "is_fact": True,
+            "predictive_sentences": [],
+            "tech_category": item.get("category", "科技"),
+            "tech_sentiment": item.get("sentiment", "neutral"),
+            "prediction_score": 0.0,
+            "impact_score": 0.0
+        } for i, item in enumerate(FALLBACK_NEWS)]
 
     def collect(self):
         if self.use_mock:
-            print("使用模拟数据")
-            return self.get_mock_news()
+            print("使用模拟数据模式")
+            return self._get_fallback_news()
 
         # 1. 多源采集
         all_news = []
-        if "AKShare" in self.sources: all_news.extend(fetch_akshare(['000977','002230','300750']))
-        if "财联社" in self.sources: all_news.extend(fetch_cls())
-        if "华尔街见闻" in self.sources: all_news.extend(fetch_wallstreetcn())
-        if "新浪科技" in self.sources: all_news.extend(fetch_sina())
+        if "AKShare" in self.sources:
+            all_news.extend(fetch_akshare(['000977','002230','300750','688981']))
+        if "财联社" in self.sources:
+            all_news.extend(fetch_cls())
+        if "华尔街见闻" in self.sources:
+            all_news.extend(fetch_wallstreetcn())
+        if "新浪科技" in self.sources:
+            all_news.extend(fetch_sina())
         print(f"原始采集: {len(all_news)} 条")
 
         if not all_news:
-            return self.get_mock_news()
+            print("无采集数据，使用保底模拟数据")
+            return self._get_fallback_news()
 
-        # 2. 初筛：优先使用HF零样本，否则用关键词保底
+        # 2. 初筛：优先 HF，否则关键词
         candidates = []
         if self.use_hf_filter:
-            hf_model = get_zero_shot()
-            if hf_model is not None:
+            hf = get_zero_shot()
+            if hf is not None:
                 print("使用 HF 模型进行初筛...")
-                for idx, news in enumerate(all_news):
-                    title = news['title']
-                    content = news.get('content', '')
-                    if hf_is_tech(title, content, threshold=0.6):
+                for news in all_news:
+                    if hf_is_tech(news['title'], news.get('content', ''), threshold=0.6):
                         candidates.append(news)
                 print(f"HF 初筛通过: {len(candidates)} 条")
             else:
                 print("HF不可用，使用关键词保底")
-                keywords = ["AI", "芯片", "半导体", "机器人", "英伟达", "中芯", "自动驾驶", "算力"]
-                candidates = [n for n in all_news if any(k in n['title'] for k in keywords)]
+                candidates = [n for n in all_news if keyword_filter(n)]
                 print(f"关键词保底筛选: {len(candidates)} 条")
         else:
-            # 如果未启用 HF 筛选，可以不做初筛，直接进入下一步，但为了效率，仍用简单关键词过滤
-            keywords = ["AI", "芯片", "半导体", "机器人", "英伟达", "中芯", "自动驾驶", "算力"]
-            candidates = [n for n in all_news if any(k in n['title'] for k in keywords)]
+            # 未启用 HF 筛选时，用关键词初步过滤
+            candidates = [n for n in all_news if keyword_filter(n)]
             print(f"关键词预筛: {len(candidates)} 条")
 
         if not candidates:
-            print("初筛无结果，返回模拟数据")
-            return self.get_mock_news()
+            print("初筛无结果，使用保底模拟数据")
+            return self._get_fallback_news()
 
-        # 3. DeepSeek 精筛（可选）
+        # 3. DeepSeek 精筛
         final_news = []
         if self.use_llm_filter and DEEPSEEK_API_KEY:
             print("使用 DeepSeek 精筛...")
             for idx, news in enumerate(candidates):
                 print(f"DeepSeek 进度: {idx+1}/{len(candidates)}")
-                is_tech, cat, sent = deepseek_classify(news['title'], news.get('content','')[:300])
+                is_tech, cat, sent = deepseek_classify(news['title'], news.get('content', '')[:300])
                 if is_tech:
                     uid = hashlib.md5(f"{news['title']}{news.get('source','')}".encode()).hexdigest()[:16]
                     final_news.append({
@@ -265,5 +306,28 @@ class TechNewsCollector:
         for n in final_news:
             if not any(is_similar(n['title'], u['title']) for u in unique):
                 unique.append(n)
+
         print(f"最终科技新闻: {len(unique)} 条")
-        return unique if unique else self.get_mock_news()
+        return unique if unique else self._get_fallback_news()
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--output', '-o', default='data/news.json')
+    parser.add_argument('--mock', action='store_true')
+    args = parser.parse_args()
+    os.makedirs(os.path.dirname(args.output), exist_ok=True)
+    collector = TechNewsCollector(use_mock=args.mock)
+    news_list = collector.collect()
+    output = {
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "timestamp": datetime.now().isoformat(),
+        "total": len(news_list),
+        "news": news_list
+    }
+    with open(args.output, 'w', encoding='utf-8') as f:
+        json.dump(output, f, ensure_ascii=False, indent=2)
+    print(f"✅ 保存至 {args.output}")
+
+if __name__ == "__main__":
+    main()
