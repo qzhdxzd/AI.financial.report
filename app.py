@@ -16,12 +16,12 @@ DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 
 def get_live_market_data():
-    """获取实时大盘数据（兼容新版 akshare）"""
     try:
         import akshare as ak
-        df = ak.stock_zh_a_spot()
-        sh = df[df['代码'] == 'sh000001']
-        sz = df[df['代码'] == 'sz399001']
+        # 使用 stock_zh_index_spot 获取实时指数
+        df = ak.stock_zh_index_spot()
+        sh = df[df['名称'] == '上证指数']
+        sz = df[df['名称'] == '深证指数']
         sh_close = sh['最新价'].iloc[0] if not sh.empty else "--"
         sh_chg = sh['涨跌幅'].iloc[0] if not sh.empty else 0
         sz_close = sz['最新价'].iloc[0] if not sz.empty else "--"
@@ -30,7 +30,6 @@ def get_live_market_data():
     except Exception as e:
         print(f"获取市场数据失败: {e}")
         return "--", 0, "--", 0
-
 def call_deepseek(prompt: str, max_tokens: int = 1500) -> str:
     """调用 DeepSeek API，返回生成文本；若失败返回错误信息"""
     if not DEEPSEEK_API_KEY:
