@@ -1,9 +1,8 @@
-gradio==4.44.0
-akshare==1.16.52
-requests==2.32.0
-pandas==2.2.0
-numpy==1.24.0
-beautifulsoup4==4.12.0
-lxml==5.0.0
-python-dotenv==1.0.0
-EOF
+gradio>=4.44.0
+akshare
+pandas
+numpy
+requests
+beautifulsoup4
+lxml
+python-dotenv
