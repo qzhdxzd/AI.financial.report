@@ -146,44 +146,112 @@ def fetch_akshare(stocks):
 def fetch_cls():
     url = "https://www.cls.cn/telegraph"
     try:
-        soup = BeautifulSoup(requests.get(url, timeout=10).text, 'html.parser')
-        items = soup.select('.telegraph-item')
+        response = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+        soup = BeautifulSoup(response.text, 'html.parser')
+        items = soup.select('.telegraph-item .content')
         return [{
-            "title": clean_text(t.select_one('.title').get_text()),
-            "content": "",
+            "title": clean_text(item.select_one('a, div').get_text() if item.select_one('a, div') else ''),
+            "content": clean_text(item.get_text()),
             "timestamp": datetime.now().isoformat(),
             "source": "财联社",
-            "url": ""
-        } for t in items[:30] if t.select_one('.title')]
-    except:
+            "url": item.select_one('a')['href'] if item.select_one('a') and item.select_one('a').get('href') else ''
+        } for item in items[:30] if item.get_text().strip()]
+    except Exception as e:
+        print(f"财联社数据获取失败: {e}")
         return []
 
 def fetch_wallstreetcn():
-    url = "https://api-prod.wallstreetcn.com/apiv1/content/lives?channel=global&limit=30"
+    url = "https://api-web.itiger.com/v2/market/flash-list?page=1&column=global"
     try:
-        data = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}).json()
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        data = requests.get(url, headers=headers, timeout=10).json()
         return [{
-            "title": clean_text(item.get('content_text', '')[:100]),
-            "content": clean_text(item.get('content_text', '')),
-            "timestamp": item.get('created_at', datetime.now().isoformat()),
-            "source": "华尔街见闻",
-            "url": f"https://wallstreetcn.com/live/{item.get('id','')}"
-        } for item in data.get('data', {}).get('items', []) if item.get('content_text')]
-    except:
+            "title": clean_text(item.get('title', item.get('content', ''))[:100]),
+            "content": clean_text(item.get('content', '')),
+            "timestamp": item.get('publish_time', datetime.now().isoformat()) if item.get('publish_time') else datetime.now().isoformat(),
+            "source": "老虎财经",
+            "url": item.get('link_url', '')
+        } for item in data.get('data', {}).get('list', []) if item.get('content')]
+    except Exception as e:
+        print(f"老虎财经数据获取失败: {e}")
+        # 如果API失败，尝试备用方法
+        try:
+            alt_url = "https://api-prod.wallstreetcn.com/apiv1/content/lives?channel=global&limit=30"
+            data = requests.get(alt_url, headers=headers).json()
+            return [{
+                "title": clean_text(item.get('content_text', '')[:100]),
+                "content": clean_text(item.get('content_text', '')),
+                "timestamp": item.get('created_at', datetime.now().isoformat()),
+                "source": "华尔街见闻",
+                "url": f"https://wallstreetcn.com/live/{item.get('id','')}"
+            } for item in data.get('data', {}).get('items', []) if item.get('content_text')]
+        except:
+            return []
+
+def fetch_sina_tech():
+    """获取新浪科技新闻"""
+    url = "https://tech.sina.com.cn/roll/index.d.html?page=1"
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        response = requests.get(url, timeout=10, headers=headers)
+        response.encoding = 'utf-8'
+        soup = BeautifulSoup(response.text, 'html.parser')
+        news_items = []
+        for item in soup.select('.list-blk li'):
+            title_elem = item.select_one('a')
+            if title_elem:
+                title = clean_text(title_elem.get_text())
+                link = title_elem.get('href', '')
+                if title:
+                    news_items.append({
+                        "title": title,
+                        "content": "",
+                        "timestamp": datetime.now().isoformat(),
+                        "source": "新浪科技",
+                        "url": link
+                    })
+        return news_items[:20]
+    except Exception as e:
+        print(f"新浪科技数据获取失败: {e}")
         return []
 
-def fetch_sina():
-    url = "https://finance.sina.com.cn/tech/"
+def fetch_36kr():
+    """获取36氪科技新闻"""
+    url = "https://36kr.com/api/information-flow/article/latest?per_page=20"
     try:
-        soup = BeautifulSoup(requests.get(url, timeout=10).text, 'html.parser')
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://36kr.com/"
+        }
+        response = requests.get(url, timeout=10, headers=headers)
+        data = response.json()
         return [{
-            "title": clean_text(a.get_text()),
+            "title": clean_text(item['item_title']),
+            "content": clean_text(item.get('summary', '')),
+            "timestamp": item.get('published_at', datetime.now().isoformat()),
+            "source": "36氪",
+            "url": f"https://36kr.com/p/{item['id']}"
+        } for item in data.get('data', {}).get('items', []) if item.get('item_title')]
+    except Exception as e:
+        print(f"36氪数据获取失败: {e}")
+        return []
+
+def fetch_zhihu_daily():
+    """获取知乎日报科技类文章"""
+    url = "https://news-at.zhihu.com/api/3/news/latest"
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        response = requests.get(url, timeout=10, headers=headers)
+        data = response.json()
+        return [{
+            "title": clean_text(story.get('title', '')),
             "content": "",
             "timestamp": datetime.now().isoformat(),
-            "source": "新浪科技",
-            "url": a.get('href', '')
-        } for a in soup.select('a[href*="/tech/"]')[:20] if len(clean_text(a.get_text())) > 5]
-    except:
+            "source": "知乎日报",
+            "url": story.get('url', '')
+        } for story in data.get('stories', [])[:15]]
+    except Exception as e:
+        print(f"知乎日报数据获取失败: {e}")
         return []
 
 # ==================== 主采集器类 ====================
@@ -192,7 +260,7 @@ class TechNewsCollector:
         self.use_mock = use_mock
         self.use_llm_filter = use_llm_filter
         self.use_hf_filter = use_hf_filter
-        self.sources = selected_sources or ["AKShare", "财联社", "华尔街见闻", "新浪科技"]
+        self.sources = selected_sources or ["AKShare", "财联社", "老虎财经", "新浪科技", "36氪", "知乎日报"]
 
     def _get_fallback_news(self):
         """返回保底模拟新闻"""
@@ -224,11 +292,16 @@ class TechNewsCollector:
             all_news.extend(fetch_akshare(['000977','002230','300750','688981']))
         if "财联社" in self.sources:
             all_news.extend(fetch_cls())
-        if "华尔街见闻" in self.sources:
+        if "老虎财经" in self.sources or "华尔街见闻" in self.sources:
             all_news.extend(fetch_wallstreetcn())
         if "新浪科技" in self.sources:
-            all_news.extend(fetch_sina())
-        print(f"原始采集: {len(all_news)} 条")
+            all_news.extend(fetch_sina_tech())
+        if "36氪" in self.sources:
+            all_news.extend(fetch_36kr())
+        if "知乎日报" in self.sources:
+            all_news.extend(fetch_zhihu_daily())
+
+        print(f"原始采集: {len(all_news)} 条来自 {len([s for s in self.sources if s in [n['source'] for n in all_news]])} 个不同来源")
 
         if not all_news:
             print("无采集数据，使用保底模拟数据")
