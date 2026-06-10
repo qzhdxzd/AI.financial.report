@@ -45,7 +45,7 @@ FALLBACK_NEWS = [
 ]
 
 # ==================== 辅助函数 ====================
-def is_similar(t1, t2, thresh=0.85):
+def is_similar(t1, t2, thresh=0.6):  # 进一步降低相似度阈值
     return SequenceMatcher(None, t1, t2).ratio() > thresh
 
 def clean_text(text):
@@ -78,15 +78,15 @@ def deepseek_classify(title: str, content: str):
 内容：{content[:300]}"""
     result = call_deepseek(prompt)
     if not result:
-        return (False, "", "neutral")
+        return (True, "科技", "neutral")  # 默认认为是科技新闻，避免过度筛选
     try:
         data = json.loads(result)
-        return (data.get("is_tech", False), data.get("category", ""), data.get("sentiment", "neutral"))
+        return (data.get("is_tech", True), data.get("category", "科技"), data.get("sentiment", "neutral"))
     except:
-        return (False, "", "neutral")
+        return (True, "科技", "neutral")
 
 # ==================== 关键词保底库 ====================
-KEYWORDS_FALLBACK = ["AI", "芯片", "半导体", "机器人", "英伟达", "中芯", "自动驾驶", "算力", "大模型", "GPU", "科技", "互联网", "软件", "硬件", "云计算", "大数据", "人工智能", "区块链", "物联网", "5G", "虚拟现实", "量子计算"]
+KEYWORDS_FALLBACK = ["AI", "芯片", "半导体", "机器人", "英伟达", "中芯", "自动驾驶", "算力", "大模型", "GPU", "科技", "互联网", "软件", "硬件", "智能", "电子", "通信", "网络", "数据", "云", "区块链", "虚拟现实", "增强现实", "物联网", "5G", "人工智能"]
 
 def keyword_filter(news: Dict) -> bool:
     text = f"{news.get('title', '')} {news.get('content', '')}".lower()
@@ -112,14 +112,17 @@ def get_zero_shot():
             _zero_shot = False
     return _zero_shot if _zero_shot is not False else None
 
-def hf_is_tech(title: str, content: str, threshold: float = 0.4) -> bool:  # 降低阈值以获得更多信息
+def hf_is_tech(title: str, content: str, threshold: float = 0.3):  # 进一步降低阈值
     classifier = get_zero_shot()
     if classifier is None:
-        return False
+        return True  # 如果模型不可用，默认认为是科技新闻
     candidate_labels = ["科技", "财经", "娱乐", "体育", "政治"]
     text = f"{title}。{content}"[:500]
-    result = classifier(text, candidate_labels)
-    return result['labels'][0] == "科技" and result['scores'][0] > threshold
+    try:
+        result = classifier(text, candidate_labels)
+        return result['labels'][0] == "科技" and result['scores'][0] > threshold
+    except:
+        return True  # 出错时默认认为是科技新闻
 
 # ==================== 数据源采集 ====================
 def fetch_akshare(stocks):
@@ -161,53 +164,42 @@ def fetch_cls():
         return []
 
 def fetch_wallstreetcn():
-    # 首先尝试原API
-    url = "https://api-web.itiger.com/v2/market/flash-list?page=1&column=global"
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        data = requests.get(url, headers=headers, timeout=10).json()
-        tiger_news = [{
-            "title": clean_text(item.get('title', item.get('content', ''))[:100]),
-            "content": clean_text(item.get('content', '')),
-            "timestamp": item.get('publish_time', datetime.now().isoformat()) if item.get('publish_time') else datetime.now().isoformat(),
-            "source": "老虎财经",
-            "url": item.get('link_url', '')
-        } for item in data.get('data', {}).get('list', []) if item.get('content')]
-        
-        if tiger_news:
-            return tiger_news
-    except Exception as e:
-        print(f"老虎财经API获取失败: {e}")
-
-    # 如果原API失败，尝试华尔街见闻
-    try:
-        alt_url = "https://api-prod.wallstreetcn.com/apiv1/content/lives?channel=global&limit=30"
-        data = requests.get(alt_url, headers=headers).json()
-        wallstreet_news = [{
-            "title": clean_text(item.get('content_text', '')[:100]),
-            "content": clean_text(item.get('content_text', '')),
-            "timestamp": item.get('created_at', datetime.now().isoformat()),
-            "source": "华尔街见闻",
-            "url": f"https://wallstreetcn.com/live/{item.get('id','')}"
-        } for item in data.get('data', {}).get('items', []) if item.get('content_text')]
-        
-        if wallstreet_news:
-            return wallstreet_news
-    except Exception as e:
-        print(f"华尔街见闻API获取失败: {e}")
-
+    # 尝试多个API端点和网页源
+    sources = [
+        ("https://api-prod.wallstreetcn.com/apiv1/content/lives?channel=global&limit=30", "华尔街见闻"),
+        ("https://api-app-wallstreetcn-com-apifc.wallstcn.com/apiv1/content/lives?channel=global&limit=30", "华尔街见闻"),
+    ]
+    
+    for api_url, source_name in sources:
+        try:
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            data = requests.get(api_url, headers=headers, timeout=10).json()
+            news_items = [{
+                "title": clean_text(item.get('content_text', '')[:100]),
+                "content": clean_text(item.get('content_text', '')),
+                "timestamp": item.get('created_at', datetime.now().isoformat()),
+                "source": source_name,
+                "url": f"https://wallstreetcn.com/live/{item.get('id','')}" if item.get('id') else ''
+            } for item in data.get('data', {}).get('items', []) if item.get('content_text')]
+            if news_items:
+                return news_items
+        except Exception as e:
+            print(f"{source_name} API获取失败: {e}")
+    
     # 如果API都失败，尝试网页爬取
     try:
         web_url = "https://www.wallstreetcn.com/live/global"
         response = requests.get(web_url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
-        items = soup.select('.live-item')
+        items = soup.select('.live-list-item .title a')  # 调整选择器
+        if not items:
+            items = soup.select('.article-item .title a')  # 备用选择器
         web_news = [{
-            "title": clean_text(item.get_text()[:100]),
+            "title": clean_text(item.get_text()),
             "content": clean_text(item.get_text()),
             "timestamp": datetime.now().isoformat(),
             "source": "华尔街见闻",
-            "url": "https://www.wallstreetcn.com/live/global"
+            "url": item.get('href', '') if item.get('href') else ''
         } for item in items[:20] if item.get_text().strip()]
         return web_news
     except Exception as e:
@@ -216,35 +208,42 @@ def fetch_wallstreetcn():
 
 def fetch_sina_tech():
     """获取新浪科技新闻"""
-    url = "https://tech.sina.com.cn/roll/index.d.html?page=1"
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        response = requests.get(url, timeout=10, headers=headers)
-        response.encoding = 'utf-8'
-        soup = BeautifulSoup(response.text, 'html.parser')
-        news_items = []
-        for item in soup.select('.list-blk li'):
-            title_elem = item.select_one('a')
-            if title_elem:
-                title = clean_text(title_elem.get_text())
-                link = title_elem.get('href', '')
-                if title:
-                    news_items.append({
-                        "title": title,
-                        "content": "",
-                        "timestamp": datetime.now().isoformat(),
-                        "source": "新浪科技",
-                        "url": link
-                    })
-        return news_items[:20]
-    except Exception as e:
-        print(f"新浪科技数据获取失败: {e}")
-        return []
+    urls = [
+        "https://tech.sina.com.cn/roll/index.d.html?page=1",
+        "https://roll.news.sina.com.cn/interface/rollnews_ch_out_interface.php?col=42",
+    ]
+    
+    for url in urls:
+        try:
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            response = requests.get(url, timeout=10, headers=headers)
+            response.encoding = 'utf-8'
+            soup = BeautifulSoup(response.text, 'html.parser')
+            news_items = []
+            for item in soup.select('.list-blk li, .news-item'):  # 多种可能的选择器
+                title_elem = item.select_one('a')
+                if title_elem:
+                    title = clean_text(title_elem.get_text())
+                    link = title_elem.get('href', '')
+                    if title:
+                        news_items.append({
+                            "title": title,
+                            "content": "",
+                            "timestamp": datetime.now().isoformat(),
+                            "source": "新浪科技",
+                            "url": link
+                        })
+            if news_items:
+                return news_items[:20]
+        except Exception as e:
+            print(f"新浪科技数据获取失败: {e}")
+    
+    return []
 
 def fetch_36kr():
     """获取36氪科技新闻"""
-    url = "https://36kr.com/api/information-flow/article/latest?per_page=20"
     try:
+        url = "https://36kr.com/api/information-flow/article/latest?per_page=20"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer": "https://36kr.com/"
@@ -264,14 +263,14 @@ def fetch_36kr():
 
 def fetch_zhihu_daily():
     """获取知乎日报科技类文章"""
-    url = "https://news-at.zhihu.com/api/3/news/latest"
     try:
+        url = "https://news-at.zhihu.com/api/3/news/latest"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         response = requests.get(url, timeout=10, headers=headers)
         data = response.json()
         return [{
             "title": clean_text(story.get('title', '')),
-            "content": "",
+            "content": clean_text(story.get('title', '')),  # 使用标题作为内容
             "timestamp": datetime.now().isoformat(),
             "source": "知乎日报",
             "url": story.get('url', '')
@@ -280,59 +279,72 @@ def fetch_zhihu_daily():
         print(f"知乎日报数据获取失败: {e}")
         return []
 
-def fetch_tencent_news():
-    """获取腾讯新闻科技频道"""
+def fetch_tencent_tech():
+    """获取腾讯科技新闻"""
     try:
-        url = "https://rabc2.50bang.org/api/getData.do?bizCode=yidian&siteId=33649&pageNum=1&pageSize=20&typeIds=13"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        response = requests.get(url, timeout=10, headers=headers)
-        data = response.json()
-        return [{
-            "title": clean_text(item.get('title', '')),
-            "content": clean_text(item.get('content', '')),
-            "timestamp": item.get('pubTime', datetime.now().isoformat()),
-            "source": "腾讯新闻",
-            "url": item.get('url', '')
-        } for item in data.get('data', {}).get('list', []) if item.get('title')]
-    except Exception as e:
-        print(f"腾讯新闻数据获取失败: {e}")
-        # 备用方法：直接爬取页面
-        try:
-            page_url = "https://new.qq.com/ch/tech"
-            response = requests.get(page_url, timeout=10, headers=headers)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            items = soup.select('.Q-tpWrap h3 a')
-            return [{
-                "title": clean_text(item.get_text()),
-                "content": "",
-                "timestamp": datetime.now().isoformat(),
-                "source": "腾讯新闻",
-                "url": item.get('href', '')
-            } for item in items[:15] if item.get_text().strip()]
-        except Exception as e2:
-            print(f"腾讯新闻备用方法也失败: {e2}")
-            return []
-
-def fetch_ifeng_news():
-    """获取凤凰新闻科技频道"""
-    try:
-        url = "https://api.iclient.ifeng.com/ClientNews?id=SYLB10,SYDT10&pullNum=0&specialType="
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        response = requests.get(url, timeout=10, headers=headers)
-        data = response.json()
-        tech_news = []
-        for doc in data.get('SYDT10', []):
-            if 'tech' in doc.get('newsType', '').lower() or '科技' in doc.get('title', ''):
-                tech_news.append({
-                    "title": clean_text(doc.get('title', '')),
-                    "content": clean_text(doc.get('description', '')),
-                    "timestamp": doc.get('updateTime', datetime.now().isoformat()),
-                    "source": "凤凰新闻",
-                    "url": doc.get('url', '')
+        response = requests.get("https://tech.qq.com/", timeout=10, headers=headers)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        items = []
+        for item in soup.select('.Q-tpWrap h3 a, .list-hd h3 a')[:15]:
+            title = clean_text(item.get_text())
+            link = item.get('href', '')
+            if title and link:
+                items.append({
+                    "title": title,
+                    "content": "",
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "腾讯科技",
+                    "url": link if link.startswith('http') else 'https://tech.qq.com' + link
                 })
-        return tech_news[:15]
+        return items
     except Exception as e:
-        print(f"凤凰新闻数据获取失败: {e}")
+        print(f"腾讯科技数据获取失败: {e}")
+        return []
+
+def fetch_ifeng_tech():
+    """获取凤凰科技新闻"""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        response = requests.get("http://tech.ifeng.com/", timeout=10, headers=headers)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        items = []
+        for item in soup.select('.newsList2018 .news-stream-newsStream .stream-headline-title a')[:15]:
+            title = clean_text(item.get_text())
+            link = item.get('href', '')
+            if title and link:
+                items.append({
+                    "title": title,
+                    "content": "",
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "凤凰科技",
+                    "url": link
+                })
+        return items
+    except Exception as e:
+        print(f"凤凰科技数据获取失败: {e}")
+        return []
+
+def fetch_baidu_top():
+    """获取百度搜索风云榜科技类"""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        response = requests.get("http://top.baidu.com/buzz?b=11", timeout=10, headers=headers)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        items = []
+        for item in soup.select('.keyword a.list-title')[:10]:
+            title = clean_text(item.get_text())
+            if title:
+                items.append({
+                    "title": title,
+                    "content": "百度热搜科技新闻",
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "百度热搜",
+                    "url": item.get('href', '')
+                })
+        return items
+    except Exception as e:
+        print(f"百度热搜数据获取失败: {e}")
         return []
 
 # ==================== 主采集器类 ====================
@@ -341,7 +353,7 @@ class TechNewsCollector:
         self.use_mock = use_mock
         self.use_llm_filter = use_llm_filter
         self.use_hf_filter = use_hf_filter
-        self.sources = selected_sources or ["AKShare", "财联社", "老虎财经", "新浪科技", "36氪", "知乎日报", "腾讯新闻"]
+        self.sources = selected_sources or ["AKShare", "财联社", "华尔街见闻", "新浪科技", "36氪", "知乎日报", "腾讯科技", "凤凰科技", "百度热搜"]
 
     def _get_fallback_news(self):
         """返回保底模拟新闻"""
@@ -371,45 +383,34 @@ class TechNewsCollector:
         all_news = []
         source_counts = {}
         
-        if "AKShare" in self.sources:
-            news = fetch_akshare(['000977','002230','300750','688981'])
-            all_news.extend(news)
-            source_counts["AKShare"] = len(news)
-            
-        if "财联社" in self.sources:
-            news = fetch_cls()
-            all_news.extend(news)
-            source_counts["财联社"] = len(news)
-            
-        if "老虎财经" in self.sources or "华尔街见闻" in self.sources:
-            news = fetch_wallstreetcn()
-            all_news.extend(news)
-            source_counts["老虎财经/华尔街见闻"] = len(news)
-            
-        if "新浪科技" in self.sources:
-            news = fetch_sina_tech()
-            all_news.extend(news)
-            source_counts["新浪科技"] = len(news)
-            
-        if "36氪" in self.sources:
-            news = fetch_36kr()
-            all_news.extend(news)
-            source_counts["36氪"] = len(news)
-            
-        if "知乎日报" in self.sources:
-            news = fetch_zhihu_daily()
-            all_news.extend(news)
-            source_counts["知乎日报"] = len(news)
-            
-        if "腾讯新闻" in self.sources:
-            news = fetch_tencent_news()
-            all_news.extend(news)
-            source_counts["腾讯新闻"] = len(news)
-            
-        if "凤凰新闻" in self.sources:
-            news = fetch_ifeng_news()
-            all_news.extend(news)
-            source_counts["凤凰新闻"] = len(news)
+        source_functions = {
+            "AKShare": fetch_akshare,
+            "财联社": fetch_cls,
+            "华尔街见闻": fetch_wallstreetcn,
+            "新浪科技": fetch_sina_tech,
+            "36氪": fetch_36kr,
+            "知乎日报": fetch_zhihu_daily,
+            "腾讯科技": fetch_tencent_tech,
+            "凤凰科技": fetch_ifeng_tech,
+            "百度热搜": fetch_baidu_top
+        }
+        
+        for source_name in self.sources:
+            if source_name in source_functions:
+                print(f"正在采集{source_name}数据...")
+                try:
+                    if source_name == "AKShare":
+                        # AKShare需要特殊参数
+                        news = source_functions[source_name](['000977','002230','300750','688981'])
+                    else:
+                        news = source_functions[source_name]()
+                    
+                    all_news.extend(news)
+                    source_counts[source_name] = len(news)
+                    print(f"  - {source_name}: {len(news)} 条")
+                except Exception as e:
+                    print(f"  - {source_name}: 采集失败 - {e}")
+                    source_counts[source_name] = 0
 
         print(f"原始采集: {len(all_news)} 条来自 {len([k for k, v in source_counts.items() if v > 0])} 个不同来源")
         for source, count in source_counts.items():
@@ -420,59 +421,72 @@ class TechNewsCollector:
             print("无采集数据，使用保底模拟数据")
             return self._get_fallback_news()
 
-        # 2. 初筛：关键词筛选（更宽松的条件）
+        # 2. 宽松筛选策略：即使没有HF或关键词匹配，也保留一定数量的新闻
         candidates = []
         if self.use_hf_filter:
             hf = get_zero_shot()
             if hf is not None:
                 print("使用 HF 模型进行初筛...")
                 for news in all_news:
-                    if hf_is_tech(news['title'], news.get('content', ''), threshold=0.4):  # 降低阈值
+                    if hf_is_tech(news['title'], news.get('content', ''), threshold=0.3):
                         candidates.append(news)
                 print(f"HF 初筛通过: {len(candidates)} 条")
             else:
-                print("HF不可用，使用关键词筛选")
-                candidates = [n for n in all_news if keyword_filter(n)]
-                print(f"关键词筛选: {len(candidates)} 条")
+                print("HF不可用，使用关键词保底")
+                candidates = all_news  # 如果HF不可用，不过滤，全部进入下一步
         else:
-            # 未启用 HF 筛选时，用关键词过滤，但放宽条件
-            candidates = [n for n in all_news if keyword_filter(n) or len(n['title']) > 10]  # 即使不匹配关键词，标题较长的也保留
-            print(f"关键词预筛: {len(candidates)} 条")
+            # 不使用HF筛选，全部保留
+            print("跳过HF筛选，保留所有采集新闻")
+            candidates = all_news
 
         if not candidates:
-            print("初筛无结果，使用保底模拟数据")
+            print("筛选后无结果，使用保底模拟数据")
             return self._get_fallback_news()
 
-        # 3. DeepSeek 精筛（如果可用）
+        # 3. LLM精筛（可选）
         final_news = []
         if self.use_llm_filter and DEEPSEEK_API_KEY:
             print("使用 DeepSeek 精筛...")
             for idx, news in enumerate(candidates):
                 print(f"DeepSeek 进度: {idx+1}/{len(candidates)}")
                 is_tech, cat, sent = deepseek_classify(news['title'], news.get('content', '')[:300])
-                if is_tech:
-                    uid = hashlib.md5(f"{news['title']}{news.get('source','')}".encode()).hexdigest()[:16]
-                    final_news.append({
-                        "id": uid,
-                        "timestamp": news['timestamp'],
-                        "source": news['source'],
-                        "title": news['title'],
-                        "content": news['content'][:500],
-                        "url": news['url'],
-                        "stock_mentioned": [],
-                        "is_fact": False,
-                        "predictive_sentences": [],
-                        "tech_category": cat,
-                        "tech_sentiment": sent,
-                        "prediction_score": 0.0,
-                        "impact_score": 0.0
-                    })
+                # 即使不是科技新闻也保留，避免过度筛选
+                uid = hashlib.md5(f"{news['title']}{news.get('source','')}".encode()).hexdigest()[:16]
+                final_news.append({
+                    "id": uid,
+                    "timestamp": news['timestamp'],
+                    "source": news['source'],
+                    "title": news['title'],
+                    "content": news['content'][:500],
+                    "url": news['url'],
+                    "stock_mentioned": [],
+                    "is_fact": False,
+                    "predictive_sentences": [],
+                    "tech_category": cat,
+                    "tech_sentiment": sent,
+                    "prediction_score": 0.0,
+                    "impact_score": 0.0
+                })
         else:
-            # 无 DeepSeek，直接使用初筛结果，但确保是科技相关内容
+            # 无 DeepSeek，直接使用筛选结果，但确保来源多样性
+            print("跳过LLM精筛，使用筛选结果...")
+            # 为了确保多样性，我们会尽量保留来自不同来源的新闻
+            source_buckets = {}
             for news in candidates:
-                # 再次简单检查是否与科技相关，避免过多无关内容
-                title_content = f"{news['title']} {news.get('content', '')}".lower()
-                if any(keyword.lower() in title_content for keyword in ['科技', '技术', '互联网', 'AI', '智能', '芯片', '数据']):
+                source = news['source']
+                if source not in source_buckets:
+                    source_buckets[source] = []
+                source_buckets[source].append(news)
+            
+            # 从每个来源中选择一定数量的新闻，确保多样性
+            for source, news_list in source_buckets.items():
+                # 按长度排序，优先保留内容较丰富的
+                sorted_news = sorted(news_list, key=lambda x: len(x.get('content', x.get('title', ''))), reverse=True)
+                # 选择前几条，但不超过总数的一定比例，防止某个来源占比过高
+                limit = max(3, len(final_news)//3)  # 确保至少有3条，但不超过总数的1/3
+                selected_from_source = sorted_news[:min(len(sorted_news), limit, 10)]
+                
+                for news in selected_from_source:
                     uid = hashlib.md5(f"{news['title']}{news.get('source','')}".encode()).hexdigest()[:16]
                     final_news.append({
                         "id": uid,
@@ -490,38 +504,29 @@ class TechNewsCollector:
                         "impact_score": 0.0
                     })
 
-        # 4. 去重（保持来源多样性）
+        # 4. 去重（进一步降低相似度阈值）
         unique = []
-        sources_used = {}  # 记录各来源已使用的数量
-        
         for n in final_news:
-            source = n['source']
-            # 检查是否与已有的新闻相似
-            is_duplicate = False
+            similar_found = False
             for u in unique:
-                if is_similar(n['title'], u['title']):
-                    is_duplicate = True
+                if is_similar(n['title'], u['title'], thresh=0.6):  # 进一步降低相似度阈值
+                    similar_found = True
                     break
-            
-            if not is_duplicate:
-                # 确保每个来源都有一定比例的新闻
-                if source not in sources_used:
-                    sources_used[source] = 0
-                # 限制单个来源的最大占比，避免某一来源占主导地位
-                total_count = len(unique)
-                source_count = sources_used[source]
-                
-                # 如果当前来源占比过高，则跳过
-                if total_count > 5 and (source_count + 1) / (total_count + 1) > 0.4:
-                    continue
-                
+            if not similar_found:
                 unique.append(n)
-                sources_used[source] += 1
 
-        print(f"最终科技新闻: {len(unique)} 条，来自 {len(set(n['source'] for n in unique))} 个不同来源")
-        for source, count in sources_used.items():
+        print(f"最终科技新闻: {len(unique)} 条，来自 {len(set([n['source'] for n in unique]))} 个不同来源")
+        for source in set([n['source'] for n in unique]):
+            count = sum(1 for n in unique if n['source'] == source)
             print(f"  - {source}: {count} 条")
         
+        # 如果最终新闻太少，补充一些fallback新闻
+        if len(unique) < 5:
+            print(f"最终新闻数量较少({len(unique)}条)，补充模拟新闻...")
+            fallback_news = self._get_fallback_news()
+            unique.extend(fallback_news[:min(5-len(unique), len(fallback_news))])
+            print(f"补充后总数: {len(unique)} 条")
+
         return unique if unique else self._get_fallback_news()
 
 def main():
