@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ModelScope 环境优化版科技新闻采集器 v4.0
-- 自动适配 cloudscraper，若不可用则跳过财联社/36kr
+ModelScope 环境优化版科技新闻采集器 v4.1
+- 自动适配 cloudscraper，若不可用则跳过 36kr
+- 优化新浪财经、东方财富、财联社接口，采用更稳定的 7x24 快讯官方 API 
+- 财联社支持 AkShare/Wap双重保底，彻底解决抓取不到大部分数据源的问题
 - 依赖稳定 RSS 源和 AKShare，确保数据量
 - 本地关键词回退，无需 DeepSeek 也能筛选
 """
@@ -31,7 +33,7 @@ try:
     CLOUDSCRAPER_AVAILABLE = True
 except ImportError:
     CLOUDSCRAPER_AVAILABLE = False
-    print("⚠️ cloudscraper 未安装，财联社/36kr 将不采集（安装: pip install cloudscraper）")
+    print("⚠️ cloudscraper 未安装，36kr 将不采集（安装: pip install cloudscraper）")
 
 # ---------- 配置 ----------
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
@@ -248,27 +250,34 @@ def fetch_tushare() -> List[Dict]:
         return []
 
 def fetch_eastmoney() -> List[Dict]:
+    """
+    通过东方财富快讯官方 API 采集（替换原有不稳定且内容残缺的 AJAX 分页接口）
+    """
     try:
-        url = ("https://finance.eastmoney.com/ajax/RefreshListPageAjax.aspx?"
-               "cb=callback&param=type%3A%221112%22%2Cpageindex%3A1%2Cpagesize%3A20")
-        resp = safe_request(url)
+        url = "https://fastnews.eastmoney.com/api/FastNews/GetFastNewsList?pageIndex=1&pageSize=30&ShowType=1"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://kuaixun.eastmoney.com/"
+        }
+        resp = safe_request(url, headers=headers)
         if not resp:
             return []
-        json_match = re.search(r'callback\((.*)\)', resp.text)
-        if not json_match:
-            return []
-        data = json.loads(json_match.group(1))
+        data = resp.json()
         news = []
-        for item in data.get('re', {}).get('list', [])[:10]:
-            title = clean_text(item.get('title', ''))
-            raw_summary = clean_text(item.get('summary', ''))
-            content = deepseek_summarize(raw_summary)
+        for item in data.get('Data', []):
+            title = clean_text(item.get('Title', ''))
+            raw_summary = clean_text(item.get('Digest', ''))
+            if not title and not raw_summary:
+                continue
+            
+            raw_content = raw_summary if raw_summary else title
+            content = deepseek_summarize(raw_content)
             news.append({
-                "title": title,
+                "title": title if title else raw_content[:25],
                 "content": content,
-                "timestamp": item.get('ptime', datetime.now().isoformat()),
+                "timestamp": item.get('ShowTime', datetime.now().isoformat()),
                 "source": "东方财富",
-                "url": item.get('url', '')
+                "url": item.get('Url', 'https://kuaixun.eastmoney.com/')
             })
         return news
     except Exception as e:
@@ -276,22 +285,34 @@ def fetch_eastmoney() -> List[Dict]:
         return []
 
 def fetch_sina_finance() -> List[Dict]:
+    """
+    通过新浪财经 7x24 快讯公开最新 JSON API 采集（规避旧滚动接口 403 频率限制）
+    """
     try:
-        resp = safe_request("https://api.finance.sina.com.cn/cbkx/roll.d.json?size=20&page=1")
+        # zhibo_id=152 代表全天候综合财经/科技快讯流
+        url = "https://zhibo.sina.com.cn/api/zhibo/feed?page=1&page_size=30&zhibo_id=152"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://finance.sina.com.cn/7x24/"
+        }
+        resp = safe_request(url, headers=headers)
         if not resp:
             return []
         data = resp.json()
+        items = data.get('result', {}).get('data', {}).get('feed', {}).get('list', [])
         news = []
-        for item in data.get('result', {}).get('data', [])[:15]:
-            title = clean_text(item.get('title', ''))
-            raw_intro = clean_text(item.get('intro', ''))
-            content = deepseek_summarize(raw_intro)
+        for item in items:
+            raw_text = clean_text(item.get('rich_text', item.get('summary', '')))
+            if not raw_text:
+                continue
+            title = clean_text(item.get('title', '')) or raw_text[:25]
+            content = deepseek_summarize(raw_text)
             news.append({
                 "title": title,
                 "content": content,
-                "timestamp": item.get('ctime', datetime.now().isoformat()),
+                "timestamp": item.get('create_time', datetime.now().isoformat()),
                 "source": "新浪财经",
-                "url": item.get('url', '')
+                "url": item.get('docurl', 'https://finance.sina.com.cn/7x24/')
             })
         return news
     except Exception as e:
@@ -475,43 +496,109 @@ def fetch_it_home() -> List[Dict]:
         print(f"   IT之家失败: {e}")
         return []
 
-# 仅当 cloudscraper 可用时才开启的财联社/36kr
 def fetch_cls() -> List[Dict]:
-    if not CLOUDSCRAPER_AVAILABLE:
-        return []
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://www.cls.cn/telegraph",
-        "Accept": "application/json",
-    }
-    scraper = cloudscraper.create_scraper()
-    urls = [
-        "https://www.cls.cn/api/telegraph/list?rn=30",
-        "https://www.cls.cn/api/telegraph/list?rn=30&type=all",
-    ]
-    for url in urls:
+    """
+    财联社多保底采集：
+    1. 优先尝试 AkShare 的内置算法解密方案（最稳定且无视 Cloudflare 风控）
+    2. 若失效则请求免签的手机端 Wap 接口（无需 cloudscraper 支持）
+    3. 最后退回到原有 PC 网页端 cloudscraper 爬取逻辑
+    """
+    news = []
+
+    # 方案一：使用 AkShare 自带的财联社电报解析接口
+    if AKSHARE_AVAILABLE:
         try:
-            resp = scraper.get(url, headers=headers, timeout=15)
-            if resp.status_code != 200:
-                continue
-            data = resp.json()
-            items = data.get("data", {}).get("roll_data", []) or data.get("roll_data", [])
-            if items:
-                news = []
-                for item in items[:30]:
-                    title = clean_text(item.get("title") or item.get("content", ""))
-                    content = deepseek_summarize(title)
+            df = ak.stock_telegraph_cls()
+            if df is not None and not df.empty:
+                for _, row in df.head(30).iterrows():
+                    raw_content = clean_text(row.get("滚动内容") or row.get("content") or "")
+                    if not raw_content:
+                        continue
+                    title = clean_text(row.get("滚动标题") or row.get("title") or raw_content[:25])
+                    content = deepseek_summarize(raw_content)
                     news.append({
                         "title": title,
+                        "content": content,
+                        "timestamp": datetime.now().isoformat(),
+                        "source": "财联社",
+                        "url": "https://www.cls.cn/telegraph"
+                    })
+                if news:
+                    if DEBUG_MODE:
+                        print("       [DEBUG] 财联社：通过 AkShare 成功获取数据")
+                    return news
+        except Exception as e:
+            if DEBUG_MODE:
+                print(f"       [DEBUG] 财联社 AkShare 接口失败，尝试下一方案: {e}")
+
+    # 方案二：直接通过移动端公开的轻量版 Wap 接口（对反爬和 CF 极其宽松）
+    try:
+        url = f"https://www.cls.cn/v1/roll/get_roll_list?category=express&last_time={int(time.time())}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/504.1",
+            "Referer": "https://m.cls.cn/",
+            "Accept": "application/json"
+        }
+        resp = safe_request(url, headers=headers)
+        if resp and resp.status_code == 200:
+            data = resp.json()
+            items = data.get("data", {}).get("roll_list", [])
+            for item in items[:30]:
+                raw_content = clean_text(item.get("content", ""))
+                if not raw_content:
+                    continue
+                title = clean_text(item.get("title", "")) or raw_content[:25]
+                content = deepseek_summarize(raw_content)
+                news.append({
+                    "title": title,
+                    "content": content,
+                    "timestamp": item.get("ctime") or datetime.now().isoformat(),
+                    "source": "财联社",
+                    "url": f"https://www.cls.cn/detail/{item.get('id')}"
+                })
+            if news:
+                if DEBUG_MODE:
+                    print("       [DEBUG] 财联社：通过 Wap 轻量接口成功获取数据")
+                return news
+    except Exception as e:
+        if DEBUG_MODE:
+            print(f"       [DEBUG] 财联社 Wap 接口失败，尝试下一方案: {e}")
+
+    # 方案三：退回原有 cloudscraper 方案
+    if CLOUDSCRAPER_AVAILABLE:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://www.cls.cn/telegraph",
+            "Accept": "application/json",
+        }
+        scraper = cloudscraper.create_scraper()
+        urls = [
+            "https://www.cls.cn/api/telegraph/list?rn=30",
+            "https://www.cls.cn/api/telegraph/list?rn=30&type=all",
+        ]
+        for url in urls:
+            try:
+                resp = scraper.get(url, headers=headers, timeout=15)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                items = data.get("data", {}).get("roll_data", []) or data.get("roll_data", [])
+                for item in items[:30]:
+                    title = clean_text(item.get("title") or item.get("content", ""))
+                    raw_content = clean_text(item.get("content", "")) or title
+                    content = deepseek_summarize(raw_content)
+                    news.append({
+                        "title": title[:25] if title == raw_content else title,
                         "content": content,
                         "timestamp": item.get("ctime") or datetime.now().isoformat(),
                         "source": "财联社",
                         "url": item.get("shareurl") or f"https://www.cls.cn/detail/{item.get('id')}"
                     })
-                return news
-        except Exception as e:
-            if DEBUG_MODE:
-                print(f"   财联社 cloudscraper 失败: {e}")
+                if news:
+                    return news
+            except Exception as e:
+                if DEBUG_MODE:
+                    print(f"       [DEBUG] 财联社 cloudscraper URL 失败: {e}")
     return []
 
 def fetch_36kr() -> List[Dict]:
@@ -557,23 +644,21 @@ class TechNewsCollector:
     def __init__(self, use_mock=False, use_llm_filter=True, selected_sources=None):
         self.use_mock = use_mock
         self.use_llm_filter = use_llm_filter and bool(DEEPSEEK_API_KEY)
-        # 默认源：优先稳定源，财联社/36kr 仅在 cloudscraper 可用时包含
+        # 默认源：将财联社移回默认列表，因为即便没有 cloudscraper，它依然可以通过 AkShare/Wap 独立平稳工作
         if selected_sources is None:
             selected_sources = [
                 "AKShare", "Tushare", "东方财富", "新浪财经",
-                "华尔街见闻",
+                "华尔街见闻", "财联社",
                 "新浪科技RSS", "网易科技RSS", "虎嗅RSS",
                 "腾讯科技", "IT之家",
             ]
             if CLOUDSCRAPER_AVAILABLE:
-                selected_sources += ["财联社", "36氪"]
+                selected_sources += ["36氪"]
         self.sources = selected_sources
         if not DEEPSEEK_API_KEY:
             print("⚠️ 未设置 DEEPSEEK_API_KEY，将使用本地关键词过滤")
         else:
             print("✓ DeepSeek API 已配置")
-        if not CLOUDSCRAPER_AVAILABLE:
-            print("ℹ️ cloudscraper 不可用，跳过财联社/36kr")
 
     def _get_fallback_news(self):
         now = datetime.now().isoformat()
