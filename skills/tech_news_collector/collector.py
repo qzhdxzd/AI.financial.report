@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-优化版科技新闻采集器 (v2.0)
+优化版科技新闻采集器 (v3.0)
 改进点：
-1. 增加本地关键词回退，DeepSeek 不可用时仍能筛选
-2. 修复财联社、36氪等源 0 数据问题，使用公开API
-3. 新增 RSS 源（新浪科技、网易科技、虎嗅）提高稳定性
-4. 使用 Session 保持连接，增强反爬能力
-5. 更详细的日志与数据统计
+1. 多路尝试采集财联社、36氪，包含API、RSS、网页回退
+2. 新增稳定RSS源（新浪科技、网易科技、虎嗅）
+3. 本地关键词回退，DeepSeek不可用时仍能筛选
+4. 使用Session保持连接，增强反爬
+5. 调试模式支持，方便排查无数据问题
+6. 保底模拟数据，确保最少5条输出
 """
 
 import json
@@ -30,6 +31,7 @@ except ImportError:
 # 环境变量
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+DEBUG_MODE = os.environ.get("DEBUG", "false").lower() in ("true", "1")
 
 # 保底模拟新闻
 FALLBACK_NEWS = [
@@ -56,9 +58,8 @@ FALLBACK_NEWS = [
     }
 ]
 
-# ==================== 本地关键词过滤器（DeepSeek不可用时的回退） ====================
+# ==================== 本地关键词过滤器 ====================
 TECH_KEYWORDS = [
-    # 核心技术领域
     "人工智能", "AI", "机器学习", "深度学习", "神经网络", "大模型", "ChatGPT", "GPT",
     "芯片", "半导体", "集成电路", "晶圆", "光刻", "EUV", "GPU", "CPU", "NPU",
     "计算机", "软件", "硬件", "服务器", "数据中心", "云计算", "边缘计算",
@@ -71,7 +72,6 @@ TECH_KEYWORDS = [
     "网络安全", "信息安全", "加密", "漏洞", "黑客",
     "量子计算", "量子通信", "光子计算",
     "数字人", "AIGC", "生成式AI",
-    # 产品/公司（常与科技相关）
     "iPhone", "iOS", "Android", "华为", "小米", "OPPO", "vivo", "三星", "英伟达", "台积电",
     "特斯拉", "OpenAI", "微软", "谷歌", "Meta", "苹果", "字节跳动", "腾讯", "阿里",
 ]
@@ -86,41 +86,27 @@ NON_TECH_INDICATORS = [
 ]
 
 def local_classify(title: str, content: str) -> tuple:
-    """
-    本地规则判断是否科技新闻，返回 (is_tech, category, sentiment)
-    """
     text = f"{title} {content}".lower()
-    
-    # 先检查非科技排除词
     for w in NON_TECH_INDICATORS:
         if w in text:
             return (False, "非科技", "neutral")
-    
-    # 检查科技关键词
     matched_cat = "科技"
     for kw in TECH_KEYWORDS:
         if kw.lower() in text:
             matched_cat = kw
             break
     else:
-        # 没有关键词命中，但也没有非科技词，保守归为非科技
         return (False, "非科技", "neutral")
-    
-    # 简单情感判断
     pos_words = ["突破", "发布", "增长", "提升", "利好", "创新", "合作", "投资", "上市", "交付"]
     neg_words = ["下滑", "暴跌", "亏损", "裁员", "诉讼", "违规", "召回", "漏洞", "攻击", "禁用"]
-    
     pos_cnt = sum(1 for w in pos_words if w in text)
     neg_cnt = sum(1 for w in neg_words if w in text)
-    
     sentiment = "neutral"
     if pos_cnt > neg_cnt:
         sentiment = "positive"
     elif neg_cnt > pos_cnt:
         sentiment = "negative"
-    
     return (True, matched_cat, sentiment)
-
 
 # ==================== 辅助函数 ====================
 def is_similar(t1, t2, thresh=0.6):
@@ -129,7 +115,7 @@ def is_similar(t1, t2, thresh=0.6):
 def clean_text(text):
     return re.sub(r'\s+', ' ', text or '').strip()
 
-# 全局 session，复用连接
+# 全局 Session
 session = requests.Session()
 session.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -138,17 +124,18 @@ session.headers.update({
 })
 
 def safe_request(url, timeout=15, headers=None, retries=2):
-    """带重试的请求，使用全局 session"""
     if headers:
         session.headers.update(headers)
     for i in range(retries):
         try:
             resp = session.get(url, timeout=timeout)
+            if DEBUG_MODE:
+                print(f"       [DEBUG] {url} -> {resp.status_code} (len={len(resp.text)})")
             if resp.status_code == 200:
                 return resp
         except Exception as e:
-            if i == retries - 1:
-                raise e
+            if DEBUG_MODE:
+                print(f"       [DEBUG] {url} 请求失败: {e}")
             time.sleep(1)
     return None
 
@@ -172,10 +159,8 @@ def call_deepseek(prompt: str, max_tokens=80) -> Optional[str]:
     return None
 
 def deepseek_classify(title: str, content: str):
-    """优先使用 DeepSeek 分类，失败时回退到本地规则"""
     if not DEEPSEEK_API_KEY:
         return local_classify(title, content)
-    
     prompt = f"""请仔细判断以下新闻是否属于科技领域。科技新闻主要包括：AI、人工智能、机器学习、深度学习、芯片、半导体、集成电路、计算机、软件、硬件、互联网、移动互联网、大数据、云计算、物联网、5G、6G、区块链、虚拟现实、增强现实、自动驾驶、机器人、新能源车、生物技术、金融科技、通讯技术、网络安全、游戏技术等相关内容。
 
 如果是科技领域新闻，返回: {{"is_tech": true, "category": "具体科技领域", "sentiment": "positive/negative/neutral"}}
@@ -183,15 +168,12 @@ def deepseek_classify(title: str, content: str):
 
 标题：{title}
 内容：{content[:300]}"""
-    
     result = call_deepseek(prompt)
     if not result:
         return local_classify(title, content)
-    
     try:
         data = json.loads(result)
         is_tech = data.get("is_tech", False)
-        # 二次验证非科技词
         full_text = f"{title} {content}".lower()
         if not is_tech and any(indicator in full_text for indicator in NON_TECH_INDICATORS):
             return (False, "非科技", "neutral")
@@ -200,25 +182,18 @@ def deepseek_classify(title: str, content: str):
         return local_classify(title, content)
 
 def deepseek_summarize(content: str) -> str:
-    """生成摘要，失败则截取"""
     if not content or len(content.strip()) < 10:
         return "内容较短，无详细内容。"
-    
     if DEEPSEEK_API_KEY:
         prompt = f"""请对以下新闻内容生成一个简洁准确的概览，限制在100字以内，突出关键信息和技术要点：
 内容：{content[:500]}"""
         result = call_deepseek(prompt, max_tokens=100)
         if result:
-            result = result.replace('"', '').replace("'", "").strip()
-            return result
-    
-    # 回退：直接截取
+            return result.replace('"', '').replace("'", "").strip()
     return content[:100] + "..." if len(content) > 100 else content
-
 
 # ==================== 数据源采集函数 ====================
 
-# ---------- 原有源（已优化） ----------
 def fetch_akshare(stocks):
     if not AKSHARE_AVAILABLE:
         return []
@@ -349,7 +324,6 @@ def fetch_wallstreetcn():
                 return news
         except Exception as e:
             print(f"   华尔街见闻 API 失败: {e}")
-    
     # 网页回退
     try:
         resp = safe_request("https://www.wallstreetcn.com/live/global")
@@ -470,68 +444,163 @@ def fetch_cn_beta():
         print(f"   cnBeta失败: {e}")
         return []
 
-# ---------- 修复的源 ----------
+# ---------- 增强版财联社 ----------
 def fetch_cls():
-    """财联社电报 - 使用公开接口"""
-    url = "https://www.cls.cn/api/telegraph/list?rn=30"
+    """财联社电报 - 多路尝试"""
     headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Referer": "https://www.cls.cn/telegraph",
-        "Accept": "application/json"
+        "Accept": "application/json",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "X-Requested-With": "XMLHttpRequest",
+        "Origin": "https://www.cls.cn",
     }
+    urls = [
+        "https://www.cls.cn/api/telegraph/list?rn=30",
+        "https://www.cls.cn/api/telegraph/list?rn=30&type=all",
+        "https://www.cls.cn/api/sw?app=CailianpressWeb&os=web&sv=8.4.6",
+    ]
+    for url in urls:
+        try:
+            resp = safe_request(url, headers=headers)
+            if not resp or resp.status_code != 200:
+                continue
+            data = resp.json()
+            items = data.get("data", {}).get("roll_data", []) or \
+                    data.get("data", {}).get("list", []) or \
+                    data.get("roll_data", [])
+            if items:
+                news = []
+                for item in items[:30]:
+                    title = clean_text(item.get("title") or item.get("content", ""))
+                    content = deepseek_summarize(title)
+                    news.append({
+                        "title": title,
+                        "content": content,
+                        "timestamp": item.get("ctime") or datetime.now().isoformat(),
+                        "source": "财联社",
+                        "url": item.get("shareurl") or f"https://www.cls.cn/detail/{item.get('id')}"
+                    })
+                return news
+        except Exception as e:
+            if DEBUG_MODE:
+                print(f"   财联社 URL {url} 失败: {e}")
+    # 网页回退
     try:
-        resp = safe_request(url, headers=headers)
-        if not resp:
-            return []
-        data = resp.json()
-        items = data.get("data", {}).get("roll_data", [])
-        news = []
-        for item in items:
-            title = clean_text(item.get("title") or item.get("content", ""))
-            content = deepseek_summarize(title)
-            news.append({
-                "title": title,
-                "content": content,
-                "timestamp": item.get("ctime", datetime.now().isoformat()),
-                "source": "财联社",
-                "url": item.get("shareurl") or f"https://www.cls.cn/detail/{item.get('id')}"
-            })
-        return news
+        web_resp = safe_request("https://www.cls.cn/telegraph", headers={**headers, "Accept": "text/html"})
+        if web_resp:
+            soup = BeautifulSoup(web_resp.text, 'html.parser')
+            items = soup.select('.telegraph-content-box')
+            if items:
+                news = []
+                for item in items[:20]:
+                    title = clean_text(item.get_text())
+                    content = deepseek_summarize(title)
+                    news.append({
+                        "title": title,
+                        "content": content,
+                        "timestamp": datetime.now().isoformat(),
+                        "source": "财联社(网页)",
+                        "url": "https://www.cls.cn/telegraph"
+                    })
+                return news
     except Exception as e:
-        print(f"   财联社失败: {e}")
-        return []
+        if DEBUG_MODE:
+            print(f"   财联社网页回退失败: {e}")
+    print("   [调试] 财联社所有方案均返回0条")
+    return []
 
+# ---------- 增强版36氪 ----------
 def fetch_36kr():
-    """36氪 - 修复接口参数"""
+    """36氪 - 多路尝试"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://36kr.com/",
+        "Accept": "application/json",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    urls = [
+        "https://36kr.com/api/information-flow/article/latest?per_page=20",
+        "https://36kr.com/api/search/article?per_page=20&page=1",
+        "https://36kr.com/api/newsflash?per_page=20",
+    ]
+    for url in urls:
+        try:
+            resp = safe_request(url, headers=headers)
+            if not resp or resp.status_code != 200:
+                continue
+            data = resp.json()
+            items = (data.get("data", {}).get("items") or
+                     data.get("data", {}).get("itemList") or
+                     data.get("data", []) or [])
+            if items:
+                news = []
+                for item in items[:20]:
+                    title = clean_text(item.get("title") or item.get("item_title", ""))
+                    summary = clean_text(item.get("summary") or item.get("item_summary", ""))
+                    content = deepseek_summarize(summary) if summary else deepseek_summarize(title)
+                    news.append({
+                        "title": title,
+                        "content": content,
+                        "timestamp": item.get("published_at") or item.get("created_at", datetime.now().isoformat()),
+                        "source": "36氪",
+                        "url": item.get("url") or f"https://36kr.com/p/{item.get('id')}"
+                    })
+                return news
+        except Exception as e:
+            if DEBUG_MODE:
+                print(f"   36氪 URL {url} 失败: {e}")
+    # RSS 回退
     try:
-        headers = {
-            "Referer": "https://36kr.com/",
-            "Accept": "application/json"
-        }
-        resp = safe_request("https://36kr.com/api/information-flow/article/latest?per_page=20", headers=headers)
-        if not resp:
-            return []
-        data = resp.json()
-        items = data.get("data", {}).get("items", [])
-        news = []
-        for item in items:
-            title = clean_text(item.get("title") or item.get("item_title", ""))
-            summary = clean_text(item.get("summary") or item.get("item_summary", ""))
-            content = deepseek_summarize(summary) if summary else deepseek_summarize(title)
-            news.append({
-                "title": title,
-                "content": content,
-                "timestamp": item.get("published_at") or item.get("created_at", datetime.now().isoformat()),
-                "source": "36氪",
-                "url": item.get("url") or f"https://36kr.com/p/{item.get('id')}"
-            })
-        return news
+        rss_resp = safe_request("https://36kr.com/feed", headers={**headers, "Accept": "application/xml"})
+        if rss_resp:
+            soup = BeautifulSoup(rss_resp.text, 'xml')
+            items = soup.find_all('item')[:20]
+            news = []
+            for item in items:
+                title = clean_text(item.title.text)
+                desc = clean_text(item.description.text)
+                content = deepseek_summarize(desc)
+                news.append({
+                    "title": title,
+                    "content": content,
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "36氪(RSS)",
+                    "url": item.link.text
+                })
+            if news:
+                return news
     except Exception as e:
-        print(f"   36氪失败: {e}")
-        return []
+        if DEBUG_MODE:
+            print(f"   36氪 RSS 失败: {e}")
+    # 网页回退
+    try:
+        web_resp = safe_request("https://36kr.com/newsflashes", headers={**headers, "Accept": "text/html"})
+        if web_resp:
+            soup = BeautifulSoup(web_resp.text, 'html.parser')
+            items = soup.select('.newsflash-item .item-title')
+            if items:
+                news = []
+                for item in items[:20]:
+                    title = clean_text(item.get_text())
+                    content = deepseek_summarize(title)
+                    news.append({
+                        "title": title,
+                        "content": content,
+                        "timestamp": datetime.now().isoformat(),
+                        "source": "36氪(网页)",
+                        "url": "https://36kr.com/newsflashes"
+                    })
+                return news
+    except Exception as e:
+        if DEBUG_MODE:
+            print(f"   36氪网页回退失败: {e}")
+    print("   [调试] 36氪所有方案均返回0条")
+    return []
 
-# ---------- 新增 RSS 源 ----------
+# ---------- RSS 源 ----------
 def fetch_rss_sina_tech():
-    """新浪科技 RSS"""
     try:
         resp = safe_request("https://tech.sina.com.cn/rss/")
         if not resp:
@@ -556,7 +625,6 @@ def fetch_rss_sina_tech():
         return []
 
 def fetch_rss_163_tech():
-    """网易科技 RSS"""
     try:
         resp = safe_request("https://tech.163.com/special/tech_rss/")
         if not resp:
@@ -581,7 +649,6 @@ def fetch_rss_163_tech():
         return []
 
 def fetch_rss_huxiu():
-    """虎嗅 RSS"""
     try:
         resp = safe_request("https://www.huxiu.com/rss/0.xml")
         if not resp:
@@ -605,12 +672,11 @@ def fetch_rss_huxiu():
         print(f"   虎嗅RSS失败: {e}")
         return []
 
-
 # ==================== 主采集器 ====================
 class TechNewsCollector:
     def __init__(self, use_mock=False, use_llm_filter=True, selected_sources=None):
         self.use_mock = use_mock
-        self.use_llm_filter = use_llm_filter and bool(DEEPSEEK_API_KEY)  # 无key时自动降级
+        self.use_llm_filter = use_llm_filter and bool(DEEPSEEK_API_KEY)
         self.sources = selected_sources or [
             "AKShare", "Tushare", "东方财富", "新浪财经",
             "财联社", "华尔街见闻", "36氪",
@@ -618,9 +684,11 @@ class TechNewsCollector:
             "新浪科技RSS", "网易科技RSS", "虎嗅RSS"
         ]
         if not DEEPSEEK_API_KEY:
-            print("⚠️ 未设置 DEEPSEEK_API_KEY，将使用本地关键词过滤（准确性降低）")
+            print("⚠️ 未设置 DEEPSEEK_API_KEY，将使用本地关键词过滤")
         else:
             print("✓ DeepSeek API 已配置，使用 AI 筛选")
+        if DEBUG_MODE:
+            print("⚙️ 调试模式已开启")
 
     def _get_fallback_news(self):
         now = datetime.now().isoformat()
@@ -645,7 +713,6 @@ class TechNewsCollector:
             print("使用模拟数据模式")
             return self._get_fallback_news()
 
-        # 1. 多源采集
         source_functions = {
             "AKShare": fetch_akshare,
             "Tushare": fetch_tushare,
@@ -691,11 +758,11 @@ class TechNewsCollector:
             print("无任何采集数据，使用保底模拟数据")
             return self._get_fallback_news()
 
-        # 2. 科技新闻筛选
         print("\n--- 筛选科技新闻 ---")
         final_news = []
         for idx, item in enumerate(all_news):
-            print(f"筛选 {idx+1}/{len(all_news)}: {item['title'][:30]}...")
+            if DEBUG_MODE and idx < 5:
+                print(f"筛选 {idx+1}/{len(all_news)}: {item['title'][:30]}...")
             is_tech, cat, sent = deepseek_classify(item['title'], item.get('content', ''))
             if is_tech:
                 uid = hashlib.md5(f"{item['title']}{item.get('source','')}".encode()).hexdigest()[:16]
@@ -714,10 +781,7 @@ class TechNewsCollector:
                     "prediction_score": 0.0,
                     "impact_score": 0.0
                 })
-            else:
-                print(f"   -> 非科技，跳过")
 
-        # 3. 去重
         unique = []
         for n in final_news:
             similar_found = False
@@ -728,7 +792,6 @@ class TechNewsCollector:
             if not similar_found:
                 unique.append(n)
 
-        # 4. 保底机制：少于5条时补充模拟数据
         if len(unique) < 5:
             print(f"\n⚠️ 最终科技新闻仅 {len(unique)} 条，自动补充模拟数据")
             fallback = self._get_fallback_news()
@@ -747,18 +810,15 @@ class TechNewsCollector:
             print(f"  {src}: {cnt}")
         return unique
 
-
 def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', '-o', default='data/news.json')
-    parser.add_argument('--mock', action='store_true', help='使用模拟数据（完全跳过在线采集）')
+    parser.add_argument('--mock', action='store_true', help='使用模拟数据')
     args = parser.parse_args()
-    
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     collector = TechNewsCollector(use_mock=args.mock)
     news_list = collector.collect()
-    
     output = {
         "date": datetime.now().strftime("%Y-%m-%d"),
         "timestamp": datetime.now().isoformat(),
