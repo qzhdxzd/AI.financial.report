@@ -72,49 +72,45 @@ def call_deepseek(prompt: str, max_tokens=80):
 
 def deepseek_classify(title: str, content: str):
     """返回 (is_tech, category, sentiment)"""
-    # 本地预过滤：检查明显的非科技关键词，减少不必要的API调用
-    non_tech_indicators = ["娱乐", "明星", "影视", "体育", "足球", "篮球", "综艺", "八卦", "美食", "旅游", "时尚", "美妆", "汽车", "房产", "家居", "教育", "考试", "留学", "育儿", "健康", "养生", "医疗", "疫情", "疫苗"]
-    full_text_lower = f"{title} {content}".lower()
-    
-    # 如果包含明显的非科技词汇，且不包含强烈的科技词汇，直接判定为非科技
-    tech_indicators = ["ai", "芯片", "半导体", "互联网", "软件", "硬件", "算法", "数据", "网络", "智能", "科技", "digital", "tech", "computer", "software", "hardware"]
-    has_non_tech = any(indicator in full_text_lower for indicator in non_tech_indicators)
-    has_tech = any(indicator in full_text_lower for indicator in tech_indicators)
-    
-    if has_non_tech and not has_tech:
-        return (False, "非科技", "neutral")
+    prompt = f"""请仔细判断以下新闻是否属于科技领域。科技新闻主要包括：AI、人工智能、机器学习、深度学习、芯片、半导体、集成电路、计算机、软件、硬件、互联网、移动互联网、大数据、云计算、物联网、5G、6G、区块链、虚拟现实、增强现实、自动驾驶、机器人、新能源车、生物技术、金融科技、通讯技术、网络安全、游戏技术等相关内容。
 
-    prompt = f"""请仔细判断以下新闻是否属于科技领域。
-科技新闻主要包括：AI、人工智能、机器学习、深度学习、芯片、半导体、集成电路、计算机、软件、硬件、互联网、移动互联网、大数据、云计算、物联网、5G、6G、区块链、虚拟现实、增强现实、自动驾驶、机器人、新能源车、生物技术、金融科技、通讯技术、网络安全、游戏技术、数码产品、科技公司动态等。
-非科技新闻包括：纯娱乐八卦、体育赛事、普通社会新闻、传统行业（如餐饮、服装、房地产销售等）除非有显著的技术创新背景。
-
-如果是科技领域新闻，返回JSON: {{"is_tech": true, "category": "具体科技领域(如AI,半导体,互联网等)", "sentiment": "positive/negative/neutral"}}
-如果不是科技领域新闻，返回JSON: {{"is_tech": false, "category": "非科技", "sentiment": "neutral"}}
+如果是科技领域新闻，返回: {{"is_tech": true, "category": "具体科技领域", "sentiment": "positive/negative/neutral"}}
+如果不是科技领域新闻，返回: {{"is_tech": false, "category": "非科技领域", "sentiment": "neutral"}}
 
 标题：{title}
-内容摘要：{content[:300]}"""
-    
+内容：{content[:300]}"""
     result = call_deepseek(prompt)
     if not result:
-        # 如果API调用失败，根据本地关键词简单判断
-        if has_tech:
-            return (True, "科技", "neutral")
-        return (False, "非科技", "neutral")
-    
+        return (False, "非科技", "neutral")  # 如果API调用失败，默认认为不是科技新闻
     try:
         data = json.loads(result)
         is_tech = data.get("is_tech", False)
-        category = data.get("category", "通用")
-        sentiment = data.get("sentiment", "neutral")
-        
-        if not is_tech or category == "非科技":
+        # 进一步验证，如果标题或内容包含明显的非科技词汇，则不认为是科技新闻
+        full_text = f"{title} {content}".lower()
+        non_tech_indicators = ["娱乐", "明星", "影视", "体育", "足球", "篮球", "综艺", "八卦", "美食", "旅游", "时尚", "美妆", "汽车", "房产", "家居", "教育", "考试", "留学", "育儿", "健康", "养生", "医疗", "疫情", "疫苗"]
+        if any(indicator in full_text for indicator in non_tech_indicators) and not is_tech:
             return (False, "非科技", "neutral")
-            
-        return (is_tech, category, sentiment)
-    except Exception:
-        if has_tech:
-            return (True, "科技", "neutral")
+        return (is_tech, data.get("category", "科技"), data.get("sentiment", "neutral"))
+    except:
         return (False, "非科技", "neutral")
+
+def deepseek_summarize(content: str) -> str:
+    """使用DeepSeek生成内容概览"""
+    if not content or len(content.strip()) < 10:
+        return "内容较短，无详细内容。"
+    
+    prompt = f"""请对以下新闻内容生成一个简洁准确的概览，限制在100字以内，突出关键信息和技术要点：
+
+内容：{content[:500]}"""
+    
+    result = call_deepseek(prompt, max_tokens=100)
+    if result:
+        # 清理可能的引号或多余字符
+        result = result.replace('"', '').replace("'", "").strip()
+        return result
+    else:
+        # 如果API调用失败，返回内容的前100个字符
+        return content[:100] + "..." if len(content) > 100 else content
 
 # ==================== 数据源采集 ====================
 def fetch_akshare(stocks):
@@ -126,9 +122,10 @@ def fetch_akshare(stocks):
             df = ak.stock_news_em(symbol=code)
             if df is not None and not df.empty:
                 for _, row in df.iterrows():
+                    content_summary = deepseek_summarize(clean_text(row.get('content', '')))
                     news.append({
                         "title": clean_text(row.get('title', '')),
-                        "content": clean_text(row.get('content', ''))[:500],
+                        "content": content_summary,
                         "timestamp": row.get('publish_time', datetime.now().isoformat()),
                         "source": "AKShare",
                         "url": row.get('url', '')
@@ -138,40 +135,110 @@ def fetch_akshare(stocks):
             pass
     return news
 
+def fetch_tushare():
+    """获取Tushare财经新闻（如果没有安装tushare则跳过）"""
+    try:
+        import tushare as ts
+        # 设置token（需要用户自行配置）
+        token = os.environ.get("TUSHARE_TOKEN", "")
+        if not token:
+            print("Tushare token未配置，跳过Tushare数据获取")
+            return []
+        
+        pro = ts.pro_api(token)
+        # 获取新闻联播
+        df = pro.cctv_news(date=datetime.now().strftime('%Y%m%d'))
+        news = []
+        for _, row in df.iterrows():
+            content_summary = deepseek_summarize(clean_text(row.get('content', '')))
+            news.append({
+                "title": clean_text(row.get('title', '')),
+                "content": content_summary,
+                "timestamp": row.get('date', datetime.now().isoformat()),
+                "source": "Tushare",
+                "url": ""
+            })
+        return news
+    except ImportError:
+        print("Tushare未安装，跳过Tushare数据获取")
+        return []
+    except Exception as e:
+        print(f"Tushare数据获取失败: {e}")
+        return []
+
+def fetch_eastmoney():
+    """获取东方财富财经新闻"""
+    try:
+        url = "https://finance.eastmoney.com/ajax/RefreshListPageAjax.aspx?cb=callback&param=type%3A%221112%22%2Cpageindex%3A1%2Cpagesize%3A20%2Cftime%3A%22%22%2Cfenum%3A%22%22%2Cfield%3A%22%22%2Corder%3A%22desc%22%2Ctabid%3A%22%22%2Cfattr%3A%22%22%2Cftype%3A%22%22%2Ctag%3A%22%22%2Csort%3A%22%22%2Cdate%3A%22%22"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://finance.eastmoney.com/"
+        }
+        response = requests.get(url, timeout=10, headers=headers)
+        # 解析JSONP响应
+        import re
+        json_match = re.search(r'callback\((.*)\)', response.text)
+        if json_match:
+            data = json.loads(json_match.group(1))
+            news = []
+            for item in data.get('re', {}).get('list', [])[:10]:
+                title = clean_text(item.get('title', ''))
+                content_summary = deepseek_summarize(clean_text(item.get('summary', '')))
+                news.append({
+                    "title": title,
+                    "content": content_summary,
+                    "timestamp": item.get('ptime', datetime.now().isoformat()),
+                    "source": "东方财富",
+                    "url": item.get('url', '')
+                })
+            return news
+    except Exception as e:
+        print(f"东方财富数据获取失败: {e}")
+        return []
+
+def fetch_sina_finance():
+    """获取新浪财经新闻"""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://finance.sina.com.cn/"
+        }
+        response = requests.get("https://api.finance.sina.com.cn/cbkx/roll.d.json?size=20&page=1", timeout=10, headers=headers)
+        data = response.json()
+        news = []
+        for item in data.get('result', {}).get('data', [])[:15]:
+            title = clean_text(item.get('title', ''))
+            content_summary = deepseek_summarize(clean_text(item.get('intro', '')))
+            news.append({
+                "title": title,
+                "content": content_summary,
+                "timestamp": item.get('ctime', datetime.now().isoformat()),
+                "source": "新浪财经",
+                "url": item.get('url', '')
+            })
+        return news
+    except Exception as e:
+        print(f"新浪财经数据获取失败: {e}")
+        return []
+
 def fetch_cls():
     url = "https://www.cls.cn/telegraph"
     try:
         response = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-        response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
-        # 尝试多种选择器以适配网站结构变化
-        items = soup.select('.telegraph-item .content') 
-        if not items:
-            items = soup.select('.dibu-content a')
-        if not items:
-            items = soup.select('.title a')
-            
+        items = soup.select('.telegraph-item .content')
         news_list = []
         for item in items[:30]:
-            # 处理不同结构的内容提取
-            if item.name == 'div': # .telegraph-item .content
-                 title_tag = item.select_one('a') or item.select_one('div')
-                 title = clean_text(title_tag.get_text()) if title_tag else clean_text(item.get_text())
-                 link_tag = item.select_one('a')
-                 link = link_tag['href'] if link_tag and link_tag.get('href') else ''
-            else: # a tag directly
-                title = clean_text(item.get_text())
-                link = item.get('href', '')
-
-            if title and len(title) > 5:
-                if link and 'http' not in link:
-                    link = 'https://www.cls.cn' + link
+            title_elem = item.select_one('a, div')
+            if title_elem:
+                title = clean_text(title_elem.get_text())
+                content_summary = deepseek_summarize(clean_text(item.get_text()))
                 news_list.append({
                     "title": title,
-                    "content": "",
+                    "content": content_summary,
                     "timestamp": datetime.now().isoformat(),
                     "source": "财联社",
-                    "url": link
+                    "url": title_elem.get('href', '') if title_elem.name == 'a' else ''
                 })
         return news_list
     except Exception as e:
@@ -187,48 +254,44 @@ def fetch_wallstreetcn():
     
     for api_url, source_name in sources:
         try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "application/json",
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
-            }
-            response = requests.get(api_url, headers=headers, timeout=15)
-            if response.status_code == 200:
-                data = response.json()
-                news_items = [{
-                    "title": clean_text(item.get('content_text', '')[:100]),
-                    "content": clean_text(item.get('content_text', '')),
-                    "timestamp": item.get('created_at', datetime.now().isoformat()),
-                    "source": source_name,
-                    "url": f"https://wallstreetcn.com/live/{item.get('id','')}" if item.get('id') else ''
-                } for item in data.get('data', {}).get('items', []) if item.get('content_text')]
-                if news_items:
-                    return news_items
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            data = requests.get(api_url, headers=headers, timeout=10).json()
+            news_items = []
+            for item in data.get('data', {}).get('items', [])[:30]:
+                if item.get('content_text'):
+                    content_summary = deepseek_summarize(clean_text(item.get('content_text', '')))
+                    news_items.append({
+                        "title": clean_text(item.get('content_text', '')[:100]),
+                        "content": content_summary,
+                        "timestamp": item.get('created_at', datetime.now().isoformat()),
+                        "source": source_name,
+                        "url": f"https://wallstreetcn.com/live/{item.get('id','')}" if item.get('id') else ''
+                    })
+            if news_items:
+                return news_items
         except Exception as e:
             print(f"{source_name} API获取失败: {e}")
     
     # 如果API都失败，尝试网页爬取
     try:
         web_url = "https://www.wallstreetcn.com/live/global"
-        response = requests.get(web_url, timeout=15, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.8,en-US;q=0.5,en;q=0.3",
-        })
+        response = requests.get(web_url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         items = soup.select('.live-list-item .title a')  # 调整选择器
         if not items:
             items = soup.select('.article-item .title a')  # 备用选择器
-        if not items:
-            items = soup.select('article a')  # 再备用选择器
-        web_news = [{
-            "title": clean_text(item.get_text()),
-            "content": clean_text(item.get_text()),
-            "timestamp": datetime.now().isoformat(),
-            "source": "华尔街见闻",
-            "url": item.get('href', '') if item.get('href') else ''
-        } for item in items[:20] if item.get_text().strip()]
-        return web_news
+        news_items = []
+        for item in items[:20]:
+            if item.get_text().strip():
+                content_summary = deepseek_summarize(clean_text(item.get_text()))
+                news_items.append({
+                    "title": clean_text(item.get_text()),
+                    "content": content_summary,
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "华尔街见闻",
+                    "url": item.get('href', '') if item.get('href') else ''
+                })
+        return news_items
     except Exception as e:
         print(f"华尔街见闻网页爬取失败: {e}")
         return []
@@ -248,21 +311,19 @@ def fetch_sina_tech():
             response.encoding = 'utf-8'
             soup = BeautifulSoup(response.text, 'html.parser')
             news_items = []
-            # 选择内部链接，通常包含新闻
-            for item in soup.select('a[href*=".shtml"]'):
+            for item in soup.select('a[href*=".shtml"]')[:20]:  # 选择内部链接
                 title = clean_text(item.get_text())
-                link = item.get('href', '')
-                if title and len(title) > 5:
-                    full_link = link if link.startswith('http') else 'https:' + link if link.startswith('//') else 'https://tech.sina.com.cn' + link
+                if title and len(title) > 5:  # 确保标题有意义
+                    content_summary = deepseek_summarize(title)  # 使用标题生成概览
                     news_items.append({
                         "title": title,
-                        "content": "",
+                        "content": content_summary,
                         "timestamp": datetime.now().isoformat(),
                         "source": "新浪科技",
-                        "url": full_link
+                        "url": item.get('href', '') if item.get('href') else ''
                     })
             if news_items:
-                return news_items[:20]
+                return news_items
         except Exception as e:
             print(f"新浪科技数据获取失败: {e}")
     
@@ -274,25 +335,28 @@ def fetch_36kr():
         url = "https://36kr.com/api/information-flow/article/latest?per_page=20"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://36kr.com/",
-            "Accept": "application/json",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
+            "Referer": "https://36kr.com/"
         }
-        response = requests.get(url, timeout=15, headers=headers)
+        response = requests.get(url, timeout=10, headers=headers)
         data = response.json()
-        return [{
-            "title": clean_text(item['item_title']),
-            "content": clean_text(item.get('summary', '')),
-            "timestamp": item.get('published_at', datetime.now().isoformat()),
-            "source": "36氪",
-            "url": f"https://36kr.com/p/{item['id']}"
-        } for item in data.get('data', {}).get('items', []) if item.get('item_title')]
+        news_items = []
+        for item in data.get('data', {}).get('items', [])[:20]:
+            if item.get('item_title'):
+                content_summary = deepseek_summarize(clean_text(item.get('summary', '')))
+                news_items.append({
+                    "title": clean_text(item['item_title']),
+                    "content": content_summary,
+                    "timestamp": item.get('published_at', datetime.now().isoformat()),
+                    "source": "36氪",
+                    "url": f"https://36kr.com/p/{item['id']}"
+                })
+        return news_items
     except Exception as e:
         print(f"36氪数据获取失败: {e}")
         return []
 
 def fetch_zhihu_daily():
-    """获取知乎热榜科技类文章"""
+    """获取知乎日报科技类文章"""
     try:
         # 尝试获取知乎热榜中科技相关的内容
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -301,19 +365,18 @@ def fetch_zhihu_daily():
         tech_related = []
         tech_keywords = ['科技', 'AI', '人工智能', '芯片', '互联网', '软件', '硬件', '手机', '电脑', '编程', '算法', '数据', '网络', '智能']
         for item in data.get('data', []):
-            target = item.get('target', {})
-            title = clean_text(target.get('title', ''))
-            content = clean_text(target.get('excerpt', ''))
+            title = clean_text(item.get('target', {}).get('title', ''))
+            content = clean_text(item.get('target', {}).get('excerpt', ''))
             # 检查是否与科技相关
             full_text = f"{title} {content}".lower()
             if any(keyword.lower() in full_text for keyword in tech_keywords):
-                question_id = target.get('question', {}).get('id', '')
+                content_summary = deepseek_summarize(content)
                 tech_related.append({
                     "title": title,
-                    "content": content if content else title,
+                    "content": content_summary,
                     "timestamp": datetime.now().isoformat(),
                     "source": "知乎热榜",
-                    "url": f"https://zhihu.com/question/{question_id}" if question_id else ''
+                    "url": f"https://zhihu.com/question/{item.get('target', {}).get('question', {}).get('id', '')}"
                 })
         return tech_related
     except Exception as e:
@@ -323,41 +386,22 @@ def fetch_zhihu_daily():
 def fetch_tencent_tech():
     """获取腾讯科技新闻"""
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.8,en-US;q=0.5,en;q=0.3",
-        }
-        response = requests.get("https://tech.qq.com/", timeout=15, headers=headers)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        response = requests.get("https://tech.qq.com/", timeout=10, headers=headers)
         soup = BeautifulSoup(response.text, 'html.parser')
         items = []
-        
-        # 尝试多种选择器
-        selectors = [
-            '.Q-tpWrap h3 a',
-            '.list-hd h3 a',
-            '.info h3 a',
-            '.tit a',
-            '.newspic-news h3 a'
-        ]
-        
-        for selector in selectors:
-            elements = soup.select(selector)
-            for item in elements:
-                title = clean_text(item.get_text())
-                link = item.get('href', '')
-                if title and link:
-                    full_link = link if link.startswith('http') else 'https://tech.qq.com' + link
-                    items.append({
-                        "title": title,
-                        "content": "",
-                        "timestamp": datetime.now().isoformat(),
-                        "source": "腾讯科技",
-                        "url": full_link
-                    })
-            if len(items) >= 10:  # 如果已经有足够新闻，就跳出
-                break
-        return items[:15]
+        for item in soup.select('.Q-tpWrap h3 a, .list-hd h3 a')[:15]:
+            title = clean_text(item.get_text())
+            if title and len(title) > 5:
+                content_summary = deepseek_summarize(title)
+                items.append({
+                    "title": title,
+                    "content": content_summary,
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "腾讯科技",
+                    "url": item.get('href', '')
+                })
+        return items
     except Exception as e:
         print(f"腾讯科技数据获取失败: {e}")
         return []
@@ -365,68 +409,24 @@ def fetch_tencent_tech():
 def fetch_ifeng_tech():
     """获取凤凰科技新闻"""
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.8,en-US;q=0.5,en;q=0.3",
-        }
-        response = requests.get("http://tech.ifeng.com/", timeout=15, headers=headers)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        response = requests.get("http://tech.ifeng.com/", timeout=10, headers=headers)
         soup = BeautifulSoup(response.text, 'html.parser')
         items = []
-        
-        # 尝试多种选择器
-        selectors = [
-            '.newsList2018 .news-stream-newsStream .stream-headline-title a',
-            '.item .h5 a',
-            '.largeImgNewsCls a',
-            '.newsMain .item .h5 a'
-        ]
-        
-        for selector in selectors:
-            elements = soup.select(selector)
-            for item in elements:
-                title = clean_text(item.get_text())
-                link = item.get('href', '')
-                if title and link:
-                    items.append({
-                        "title": title,
-                        "content": "",
-                        "timestamp": datetime.now().isoformat(),
-                        "source": "凤凰科技",
-                        "url": link
-                    })
-            if len(items) >= 10:  # 如果已经有足够新闻，就跳出
-                break
-        return items[:15]
-    except Exception as e:
-        print(f"凤凰科技数据获取失败: {e}")
-        return []
-
-def fetch_baidu_top():
-    """获取百度搜索风云榜科技类"""
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.8,en-US;q=0.5,en;q=0.3",
-        }
-        response = requests.get("http://top.baidu.com/buzz?b=11", timeout=15, headers=headers)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        items = []
-        
-        for item in soup.select('.keyword a.list-title')[:10]:
+        for item in soup.select('.newsList2018 .news-stream-newsStream .stream-headline-title a')[:15]:
             title = clean_text(item.get_text())
-            if title:
+            if title and len(title) > 5:
+                content_summary = deepseek_summarize(title)
                 items.append({
                     "title": title,
-                    "content": "百度热搜科技新闻",
+                    "content": content_summary,
                     "timestamp": datetime.now().isoformat(),
-                    "source": "百度热搜",
+                    "source": "凤凰科技",
                     "url": item.get('href', '')
                 })
         return items
     except Exception as e:
-        print(f"百度热搜数据获取失败: {e}")
+        print(f"凤凰科技数据获取失败: {e}")
         return []
 
 def fetch_huxiu():
@@ -436,18 +436,16 @@ def fetch_huxiu():
         response = requests.get("https://www.huxiu.com/", timeout=10, headers=headers)
         soup = BeautifulSoup(response.text, 'html.parser')
         items = []
-        # 虎嗅网首页文章列表
         for item in soup.select('.article-item .transition a')[:15]:
             title = clean_text(item.get_text())
-            link = item.get('href', '')
-            if title and link and len(title) > 5:
-                full_link = f"https://www.huxiu.com{link}" if link.startswith('/') else link
+            if title and len(title) > 5:
+                content_summary = deepseek_summarize(title)
                 items.append({
                     "title": title,
-                    "content": "",
+                    "content": content_summary,
                     "timestamp": datetime.now().isoformat(),
                     "source": "虎嗅网",
-                    "url": full_link
+                    "url": f"https://www.huxiu.com{item.get('href', '')}" if item.get('href', '').startswith('/') else item.get('href', '')
                 })
         return items
     except Exception as e:
@@ -461,18 +459,16 @@ def fetch_it_home():
         response = requests.get("https://www.ithome.com/", timeout=10, headers=headers)
         soup = BeautifulSoup(response.text, 'html.parser')
         items = []
-        # IT之首页面新闻列表
         for item in soup.select('.bx ul li a')[:15]:
             title = clean_text(item.get_text())
-            link = item.get('href', '')
-            if title and link and len(title) > 5:
-                full_link = link if link.startswith('http') else 'https://www.ithome.com' + link
+            if title and len(title) > 5:
+                content_summary = deepseek_summarize(title)
                 items.append({
                     "title": title,
-                    "content": "",
+                    "content": content_summary,
                     "timestamp": datetime.now().isoformat(),
                     "source": "IT之家",
-                    "url": full_link
+                    "url": item.get('href', '')
                 })
         return items
     except Exception as e:
@@ -486,18 +482,16 @@ def fetch_cn_beta():
         response = requests.get("https://www.cnbeta.com/", timeout=10, headers=headers)
         soup = BeautifulSoup(response.text, 'html.parser')
         items = []
-        # cnBeta 首页新闻列表
         for item in soup.select('.items-area .item .title a')[:15]:
             title = clean_text(item.get_text())
-            link = item.get('href', '')
-            if title and link and len(title) > 5:
-                full_link = link if link.startswith('http') else 'https://www.cnbeta.com' + link
+            if title and len(title) > 5:
+                content_summary = deepseek_summarize(title)
                 items.append({
                     "title": title,
-                    "content": "",
+                    "content": content_summary,
                     "timestamp": datetime.now().isoformat(),
                     "source": "cnBeta",
-                    "url": full_link
+                    "url": item.get('href', '')
                 })
         return items
     except Exception as e:
@@ -509,7 +503,7 @@ class TechNewsCollector:
     def __init__(self, use_mock=False, use_llm_filter=True, selected_sources=None):
         self.use_mock = use_mock
         self.use_llm_filter = use_llm_filter
-        self.sources = selected_sources or ["AKShare", "财联社", "华尔街见闻", "新浪科技", "36氪", "知乎热榜", "腾讯科技", "凤凰科技", "虎嗅网", "IT之家", "cnBeta"]
+        self.sources = selected_sources or ["AKShare", "财联社", "华尔街见闻", "新浪科技", "36氪", "腾讯科技", "凤凰科技", "虎嗅网", "IT之家", "cnBeta", "Tushare", "东方财富", "新浪财经"]
 
     def _get_fallback_news(self):
         """返回保底模拟新闻"""
@@ -541,6 +535,9 @@ class TechNewsCollector:
         
         source_functions = {
             "AKShare": fetch_akshare,
+            "Tushare": fetch_tushare,
+            "东方财富": fetch_eastmoney,
+            "新浪财经": fetch_sina_finance,
             "财联社": fetch_cls,
             "华尔街见闻": fetch_wallstreetcn,
             "新浪科技": fetch_sina_tech,
@@ -579,7 +576,7 @@ class TechNewsCollector:
             print("无采集数据，使用保底模拟数据")
             return self._get_fallback_news()
 
-        # 2. 使用改进的DeepSeek进行精确筛选
+        # 2. 使用改进的DeepSeek提示词进行精确筛选
         print("使用 DeepSeek 进行科技新闻筛选...")
         final_news = []
         for idx, news in enumerate(all_news):
@@ -593,7 +590,7 @@ class TechNewsCollector:
                     "timestamp": news['timestamp'],
                     "source": news['source'],
                     "title": news['title'],
-                    "content": news['content'][:500],
+                    "content": news['content'],  # 使用已生成的概览
                     "url": news['url'],
                     "stock_mentioned": [],
                     "is_fact": False,
@@ -604,7 +601,7 @@ class TechNewsCollector:
                     "impact_score": 0.0
                 })
             else:
-                print(f"  - 跳过非科技新闻: {news['title']} (分类: {cat})")
+                print(f"  - 跳过非科技新闻: {news['title']}")
 
         # 3. 去重
         unique = []
