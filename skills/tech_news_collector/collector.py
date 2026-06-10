@@ -78,51 +78,12 @@ def deepseek_classify(title: str, content: str):
 内容：{content[:300]}"""
     result = call_deepseek(prompt)
     if not result:
-        return (True, "科技", "neutral")  # 默认认为是科技新闻，避免过度筛选
+        return (True, "科技", "neutral")  # 如果API调用失败，默认认为是科技新闻
     try:
         data = json.loads(result)
         return (data.get("is_tech", True), data.get("category", "科技"), data.get("sentiment", "neutral"))
     except:
         return (True, "科技", "neutral")
-
-# ==================== 关键词保底库 ====================
-KEYWORDS_FALLBACK = ["AI", "芯片", "半导体", "机器人", "英伟达", "中芯", "自动驾驶", "算力", "大模型", "GPU", "科技", "互联网", "软件", "硬件", "智能", "电子", "通信", "网络", "数据", "云", "区块链", "虚拟现实", "增强现实", "物联网", "5G", "人工智能"]
-
-def keyword_filter(news: Dict) -> bool:
-    text = f"{news.get('title', '')} {news.get('content', '')}".lower()
-    return any(kw.lower() in text for kw in KEYWORDS_FALLBACK)
-
-# ==================== Hugging Face 零样本模型 ====================
-_zero_shot = None
-
-def get_zero_shot():
-    global _zero_shot
-    if _zero_shot is None:
-        try:
-            from transformers import pipeline
-            print("正在加载零样本分类模型...")
-            _zero_shot = pipeline(
-                "zero-shot-classification",
-                model="facebook/bart-large-mnli",
-                device=-1
-            )
-            print("HF模型加载成功")
-        except Exception as e:
-            print(f"HF模型加载失败（将使用关键词筛选）: {e}")
-            _zero_shot = False
-    return _zero_shot if _zero_shot is not False else None
-
-def hf_is_tech(title: str, content: str, threshold: float = 0.3):  # 进一步降低阈值
-    classifier = get_zero_shot()
-    if classifier is None:
-        return True  # 如果模型不可用，默认认为是科技新闻
-    candidate_labels = ["科技", "财经", "娱乐", "体育", "政治"]
-    text = f"{title}。{content}"[:500]
-    try:
-        result = classifier(text, candidate_labels)
-        return result['labels'][0] == "科技" and result['scores'][0] > threshold
-    except:
-        return True  # 出错时默认认为是科技新闻
 
 # ==================== 数据源采集 ====================
 def fetch_akshare(stocks):
@@ -349,10 +310,9 @@ def fetch_baidu_top():
 
 # ==================== 主采集器类 ====================
 class TechNewsCollector:
-    def __init__(self, use_mock=False, use_llm_filter=True, use_hf_filter=False, selected_sources=None):
+    def __init__(self, use_mock=False, use_llm_filter=True, selected_sources=None):
         self.use_mock = use_mock
         self.use_llm_filter = use_llm_filter
-        self.use_hf_filter = use_hf_filter
         self.sources = selected_sources or ["AKShare", "财联社", "华尔街见闻", "新浪科技", "36氪", "知乎日报", "腾讯科技", "凤凰科技", "百度热搜"]
 
     def _get_fallback_news(self):
@@ -421,36 +381,14 @@ class TechNewsCollector:
             print("无采集数据，使用保底模拟数据")
             return self._get_fallback_news()
 
-        # 2. 宽松筛选策略：即使没有HF或关键词匹配，也保留一定数量的新闻
-        candidates = []
-        if self.use_hf_filter:
-            hf = get_zero_shot()
-            if hf is not None:
-                print("使用 HF 模型进行初筛...")
-                for news in all_news:
-                    if hf_is_tech(news['title'], news.get('content', ''), threshold=0.3):
-                        candidates.append(news)
-                print(f"HF 初筛通过: {len(candidates)} 条")
-            else:
-                print("HF不可用，使用关键词保底")
-                candidates = all_news  # 如果HF不可用，不过滤，全部进入下一步
-        else:
-            # 不使用HF筛选，全部保留
-            print("跳过HF筛选，保留所有采集新闻")
-            candidates = all_news
-
-        if not candidates:
-            print("筛选后无结果，使用保底模拟数据")
-            return self._get_fallback_news()
-
-        # 3. LLM精筛（可选）
+        # 2. 使用DeepSeek进行精确筛选 - 这是唯一的筛选步骤
+        print("使用 DeepSeek 进行科技新闻筛选...")
         final_news = []
-        if self.use_llm_filter and DEEPSEEK_API_KEY:
-            print("使用 DeepSeek 精筛...")
-            for idx, news in enumerate(candidates):
-                print(f"DeepSeek 进度: {idx+1}/{len(candidates)}")
-                is_tech, cat, sent = deepseek_classify(news['title'], news.get('content', '')[:300])
-                # 即使不是科技新闻也保留，避免过度筛选
+        for idx, news in enumerate(all_news):
+            print(f"DeepSeek 筛选进度: {idx+1}/{len(all_news)}")
+            is_tech, cat, sent = deepseek_classify(news['title'], news.get('content', '')[:300])
+            
+            if is_tech:  # 只保留被DeepSeek判定为科技相关的新闻
                 uid = hashlib.md5(f"{news['title']}{news.get('source','')}".encode()).hexdigest()[:16]
                 final_news.append({
                     "id": uid,
@@ -467,44 +405,8 @@ class TechNewsCollector:
                     "prediction_score": 0.0,
                     "impact_score": 0.0
                 })
-        else:
-            # 无 DeepSeek，直接使用筛选结果，但确保来源多样性
-            print("跳过LLM精筛，使用筛选结果...")
-            # 为了确保多样性，我们会尽量保留来自不同来源的新闻
-            source_buckets = {}
-            for news in candidates:
-                source = news['source']
-                if source not in source_buckets:
-                    source_buckets[source] = []
-                source_buckets[source].append(news)
-            
-            # 从每个来源中选择一定数量的新闻，确保多样性
-            for source, news_list in source_buckets.items():
-                # 按长度排序，优先保留内容较丰富的
-                sorted_news = sorted(news_list, key=lambda x: len(x.get('content', x.get('title', ''))), reverse=True)
-                # 选择前几条，但不超过总数的一定比例，防止某个来源占比过高
-                limit = max(3, len(final_news)//3)  # 确保至少有3条，但不超过总数的1/3
-                selected_from_source = sorted_news[:min(len(sorted_news), limit, 10)]
-                
-                for news in selected_from_source:
-                    uid = hashlib.md5(f"{news['title']}{news.get('source','')}".encode()).hexdigest()[:16]
-                    final_news.append({
-                        "id": uid,
-                        "timestamp": news['timestamp'],
-                        "source": news['source'],
-                        "title": news['title'],
-                        "content": news['content'][:500],
-                        "url": news['url'],
-                        "stock_mentioned": [],
-                        "is_fact": False,
-                        "predictive_sentences": [],
-                        "tech_category": "科技",
-                        "tech_sentiment": "neutral",
-                        "prediction_score": 0.0,
-                        "impact_score": 0.0
-                    })
 
-        # 4. 去重（进一步降低相似度阈值）
+        # 3. 去重（进一步降低相似度阈值）
         unique = []
         for n in final_news:
             similar_found = False
