@@ -134,12 +134,11 @@ def refresh_market():
         ["深证指数", sz_close, f"{sz_chg:.2f}%" if isinstance(sh_chg, (int, float)) else "--%"]
     ], columns=["指数", "最新价", "涨跌幅"])
 
-def run_daily_collection(use_mock, use_llm, use_hf, selected_sources):
+def run_daily_collection(use_mock, use_llm, selected_sources):
     """运行数据采集"""
     collector = TechNewsCollector(
         use_mock=use_mock,
         use_llm_filter=use_llm,
-        use_hf_filter=use_hf,
         selected_sources=selected_sources
     )
     news_list = collector.collect()
@@ -149,7 +148,7 @@ def run_daily_collection(use_mock, use_llm, use_hf, selected_sources):
         json.dump({"date": datetime.now().strftime("%Y-%m-%d"), "news": news_list}, f)
     return news_list
 
-def collect_and_report(use_mock, use_llm, use_hf, selected_sources, use_demo):
+def collect_and_report(use_mock, use_llm, selected_sources, use_demo):
     """采集新闻并生成报告（支持演示模式）"""
     # 演示模式：直接使用预设的 FALLBACK_NEWS
     if use_demo:
@@ -173,7 +172,7 @@ def collect_and_report(use_mock, use_llm, use_hf, selected_sources, use_demo):
             })
         status_msg = f"✅ 演示模式，共 {len(news)} 条示例新闻"
     else:
-        news = run_daily_collection(use_mock, use_llm, use_hf, selected_sources)
+        news = run_daily_collection(use_mock, use_llm, selected_sources)
         if not news:
             return "❌ 无新闻", "采集失败，未获取到任何新闻", ""
         status_msg = f"✅ 采集完成，共 {len(news)} 条新闻"
@@ -211,14 +210,13 @@ def collect_and_report(use_mock, use_llm, use_hf, selected_sources, use_demo):
 def create_ui():
     with gr.Blocks(title="Claw 数字员工 - 每日科技股简报", theme=gr.themes.Soft()) as demo:
         gr.Markdown("# 🦞 Claw 数字员工 - 每日科技股简报系统")
-        gr.Markdown("基于 OpenClaw 架构 | 多源采集 | HF初筛 | DeepSeek精筛 | 自动报告")
+        gr.Markdown("基于 OpenClaw 架构 | 多源采集 | DeepSeek精筛 | 自动报告")
 
         with gr.Row():
             with gr.Column(scale=1):
                 use_demo = gr.Checkbox(label="🎬 演示模式（使用示例数据）", value=True)
                 use_mock = gr.Checkbox(label="模拟采集（不访问真实数据源）", value=False)
                 use_llm = gr.Checkbox(label="DeepSeek 精筛", value=False)
-                use_hf = gr.Checkbox(label="HF零样本初筛", value=False)
                 sources = gr.CheckboxGroup(
                     choices=["AKShare", "财联社", "华尔街见闻", "新浪科技", "36氪", "知乎日报"],
                     label="数据源选择",
@@ -243,7 +241,7 @@ def create_ui():
         # 绑定事件
         collect_btn.click(
             collect_and_report,
-            inputs=[use_mock, use_llm, use_hf, sources, use_demo],
+            inputs=[use_mock, use_llm, sources, use_demo],
             outputs=[report_output, status_text, news_html]
         )
         refresh_btn.click(refresh_market, outputs=market_table)
