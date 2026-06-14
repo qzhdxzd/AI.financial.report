@@ -17,29 +17,33 @@ SOURCE_ACCURACY: Dict[str, float] = {
     "default": 0.50
 }
 
-# 确定性系数映射（包含更多词语，按优先级排序）
+# 确定性系数映射（按关键词长度降序排列，长词优先匹配，避免短词误覆盖）
 CERTAINTY_MAP: Dict[str, float] = {
     # 高确定性（1.0 - 0.9）
-    "大幅": 1.0, "明显": 0.95, "确定": 0.95, "必然": 1.0,
-    "毫无疑问": 1.0, "强势": 0.9, "正式": 0.9,
+    "毫无疑问": 1.0, "大幅": 1.0, "明显": 0.95, "确定": 0.95, "必然": 1.0,
+    "强势": 0.9, "正式发布": 0.95,
     # 中高确定性（0.85 - 0.75）
-    "预计": 0.75, "预期": 0.75, "有望": 0.8, "或将": 0.7,
-    "可能": 0.65, "大概率": 0.85, "计划": 0.8, "拟": 0.75,
+    "大概率": 0.85, "有望": 0.8, "计划": 0.8,
+    "预计": 0.75, "预期": 0.75, "拟": 0.75,
+    "或将": 0.7, "即将": 0.7,
+    "可能": 0.65, "准备": 0.65,
     # 中等确定性（0.7 - 0.6）
-    "将": 0.6, "会": 0.6, "准备": 0.65, "即将": 0.7, "接近": 0.6,
+    "将": 0.6, "会": 0.6, "接近": 0.6,
     # 中低确定性（0.55 - 0.4）
-    "或": 0.5, "或许": 0.45, "不排除": 0.4, "考虑": 0.5,
+    "或": 0.5, "或许": 0.45, "考虑": 0.5,
+    "不排除": 0.4,
     # 低确定性（0.3 - 0.1）
     "传闻": 0.2, "据传": 0.15, "疑似": 0.2,
     "default": 0.6
 }
 
-# 用于提取句子的关键词（只要句子包含其中任意一个，就被视为潜在预测）
+# 用于提取句子的关键词（只使用多字关键词，避免单字误匹配）
 EXTRACT_KEYWORDS = [
-    "将", "会", "拟", "计划", "准备", "即将", "可能", "或", "有望", "预计",
-    "预期", "大概率", "不排除", "传闻", "据传", "大幅", "明显", "确定",
+    "即将", "可能", "有望", "预计", "预期", "大概率",
+    "不排除", "传闻", "据传", "大幅", "明显", "确定",
     "正式发布", "推出", "上调", "下跌", "上涨", "增长", "下降", "突破",
-    "跌破", "选择", "达成", "合作", "开发", "申报", "调整"
+    "跌破", "选择", "达成", "合作", "开发", "申报", "调整",
+    "或将", "计划", "准备", "考虑", "疑似"
 ]
 
 def load_source_accuracy(filepath: str = "source_accuracy.json") -> Dict[str, float]:
@@ -53,12 +57,28 @@ def save_source_accuracy(acc: Dict[str, float], filepath: str = "source_accuracy
         json.dump(acc, f, ensure_ascii=False, indent=2)
 
 def get_certainty_coefficient(text: str) -> float:
-    """根据文本内容返回确定性系数（取匹配到的最高系数）"""
-    max_coeff = CERTAINTY_MAP["default"]
-    for keyword, coeff in CERTAINTY_MAP.items():
-        if keyword in text and coeff > max_coeff:
-            max_coeff = coeff
-    return max_coeff
+    """根据文本内容返回确定性系数（取匹配到的最高系数，单字词只在不构成更长词时生效）"""
+    # 按关键词长度降序排列，长词优先匹配
+    sorted_kw = sorted(
+        [(k, v) for k, v in CERTAINTY_MAP.items() if k != "default"],
+        key=lambda x: len(x[0]), reverse=True
+    )
+    matched_coeffs = []
+    matched_longest_len = 0
+
+    for keyword, coeff in sorted_kw:
+        if keyword in text:
+            kw_len = len(keyword)
+            # 单字关键词（长度=1）只在没有更长匹配时才加入
+            if kw_len == 1 and matched_longest_len > 1:
+                continue
+            matched_coeffs.append(coeff)
+            if kw_len > matched_longest_len:
+                matched_longest_len = kw_len
+
+    if matched_coeffs:
+        return max(matched_coeffs)
+    return CERTAINTY_MAP["default"]
 
 def score_prediction(pred_text: str, source_accuracy: float) -> float:
     coeff = get_certainty_coefficient(pred_text)
@@ -153,7 +173,7 @@ def main(input_file: str, output_file: str, source_acc_file: str = None):
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("用法: python claw2_scorer.py <输入JSON文件> <输出JSON文件> [信源准确率文件]")
+        print("用法: python news_score.py <输入JSON文件> <输出JSON文件> [信源准确率文件]")
         sys.exit(1)
     input_json = sys.argv[1]
     output_json = sys.argv[2]

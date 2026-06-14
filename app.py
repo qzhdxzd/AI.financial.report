@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from agent_utils import agent_stock_analysis, agent_summary
+from agent_utils import agent_market_analysis, agent_board_analysis, agent_stock_analysis, agent_summary
 from skills.score_skill import score_finance_report
 from data_utils import get_all_data
 import json
@@ -10,7 +10,8 @@ import pandas as pd
 import requests
 from skills.tech_news_collector.collector import TechNewsCollector, FALLBACK_NEWS
 # 导入Claw2 新闻打分相关函数
-from skills.news_score import process_news, load_source_accuracy
+from news_score import process_news, load_source_accuracy
+from data_utils import get_macro_news
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
@@ -149,12 +150,11 @@ def run_full_analysis():
     final_report = agent_summary(res_market, res_board, res_stock)
 
     # 4. 自动保存到历史记录（全队共用）
-    save_report(final_report)
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    news_list = [{"title": news_data, "source": "宏观新闻汇总"}]
+    save_report(final_report, news_list, date_str)
 
     return final_report
-
-from data_utils import get_macro_news
-from skills.news_score import process_news, load_source_accuracy
 
 def get_news_with_score():
     try:
@@ -266,6 +266,18 @@ def collect_and_report(use_mock, use_llm, selected_sources, use_demo):
     status_msg += f"\n📄 报告已保存至: {saved_path}"
     return report, status_msg, news_table
 
+def run_full_analysis_with_score():
+    """运行全部分析 + 评分"""
+    try:
+        final_report = run_full_analysis()
+        score_result = score_finance_report(final_report)
+        combined = final_report + "\n\n---\n\n" + score_result
+        status = "✅ 全部分析完成"
+        return combined, status
+    except Exception as e:
+        return f"❌ 分析失败: {str(e)}", f"❌ 错误: {str(e)}"
+
+
 def create_ui():
     with gr.Blocks(title="Claw 数字员工 - 每日科技股简报", theme=gr.themes.Soft()) as demo:
         gr.Markdown("# 🦞 Claw 数字员工 - 每日科技股简报系统")
@@ -282,6 +294,7 @@ def create_ui():
                     value=["AKShare", "财联社", "华尔街见闻", "新浪科技", "36氪", "知乎日报"]
                 )
                 collect_btn = gr.Button("🔄 生成今日简报", variant="primary")
+                full_analysis_btn = gr.Button("📈 三大Agent全部分析 + 评分", variant="secondary")
                 status_text = gr.Textbox(label="状态", lines=4)
 
             with gr.Column(scale=1):
@@ -306,6 +319,11 @@ def create_ui():
             collect_and_report,
             inputs=[use_mock, use_llm, sources, use_demo],
             outputs=[report_output, status_text, news_html]
+        )
+        # 三大Agent全部分析按钮绑定
+        full_analysis_btn.click(
+            run_full_analysis_with_score,
+            outputs=[report_output, status_text]
         )
         # Claw2新闻打分按钮绑定
         score_news_btn.click(

@@ -1,9 +1,35 @@
-# 模拟LLM调用函数（魔搭/OpenClaw环境直接替换为框架原生调用即可）
-def llm_chat(prompt: str) -> str:
-    # 此处替换为你项目实际的大模型调用代码
-    # 示例：result = openclaw.chat(prompt)
-    # return result
-    return "模型分析结果占位"
+import os
+import requests
+
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+
+
+def llm_chat(prompt: str, max_tokens: int = 1500) -> str:
+    """调用 DeepSeek API 进行大模型对话"""
+    if not DEEPSEEK_API_KEY:
+        return "⚠️ 未配置 DeepSeek API Key，请在环境变量中设置 DEEPSEEK_API_KEY"
+
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": 0.7
+    }
+    try:
+        resp = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=60)
+        if resp.status_code == 200:
+            return resp.json()["choices"][0]["message"]["content"]
+        else:
+            error = resp.json().get("error", {}).get("message", "未知错误")
+            return f"⚠️ API 调用失败: {error}"
+    except Exception as e:
+        return f"⚠️ 请求异常: {e}"
+
 
 # ========== Agent1 大盘分析（成员1负责） ==========
 def agent_market_analysis(index_data, news_data):
@@ -16,6 +42,7 @@ def agent_market_analysis(index_data, news_data):
 """
     return llm_chat(prompt)
 
+
 # ========== Agent2 板块分析（成员2负责） ==========
 def agent_board_analysis(board_data):
     prompt = f"""
@@ -25,6 +52,7 @@ def agent_board_analysis(board_data):
 """
     return llm_chat(prompt)
 
+
 # ========== Agent3 个股分析 + 报告汇总（成员3负责） ==========
 def agent_stock_analysis(stock_data, finance_data):
     prompt = f"""
@@ -33,6 +61,7 @@ def agent_stock_analysis(stock_data, finance_data):
 财报数据：{finance_data}
 """
     return llm_chat(prompt)
+
 
 # 总汇总智能体：整合三个Agent结果，生成最终日报
 def agent_summary(market_res, board_res, stock_res):

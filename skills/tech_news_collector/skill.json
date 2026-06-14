@@ -1,0 +1,27 @@
+{
+  "name": "tech_news_collector",
+  "description": "采集科技板块财经新闻，用于每日股票简报",
+  "version": "1.0.0",
+  "author": "你的学号",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "tech_keywords": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "科技关键词列表",
+        "default": ["AI", "芯片", "半导体", "机器人", "算力", "数据中心"]
+      },
+      "max_news_per_keyword": {
+        "type": "integer",
+        "default": 20,
+        "description": "每个关键词最多采集新闻数"
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "description": "返回包含日期和新闻列表的JSON对象"
+  },
+  "execute": "python3 -m skills.tech_news_collector.collector"
+}
