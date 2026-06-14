@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+from agent_utils import agent_market_analysis, agent_board_analysis, agent_stock_analysis, agent_summary
+from skills.score_skill import score_finance_report
+from data_utils import get_all_data
 import json
 import os
 from datetime import datetime
@@ -6,6 +9,9 @@ import gradio as gr
 import pandas as pd
 import requests
 from skills.tech_news_collector.collector import TechNewsCollector, FALLBACK_NEWS
+# 导入Claw2 新闻打分相关函数
+from news_score import process_news, load_source_accuracy
+from data_utils import get_macro_news
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
@@ -125,6 +131,178 @@ def save_report(report_text, news_list, date_str):
         f.write("\n## AI分析报告\n\n")
         f.write(report_text)
     return filename
+def run_full_analysis():
+    """一键执行：数据获取 → 三大Agent分析 → 生成最终报告"""
+    # 1. 获取全部数据
+    all_data = get_all_data()
+    index_data = all_data["大盘指数"]
+    news_data = all_data["宏观新闻"]
+    board_data = all_data["行业板块"]
+    stock_data = all_data["个股行情"]
+    finance_data = all_data["个股财报"]
+
+    # 2. 调用三位成员对应的分析函数
+    res_market = agent_market_analysis(index_data, news_data)  
+    res_board = agent_board_analysis(board_data)              
+    res_stock = agent_stock_analysis(stock_data, finance_data)  
+
+    # 3. 汇总成最终报告
+    final_report = agent_summary(res_market, res_board, res_stock)
+
+    # 4. 自动保存到历史记录（全队共用）
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    news_list = [{"title": news_data, "source": "宏观新闻汇总"}]
+    save_report(final_report, news_list, date_str)
+
+    return final_report
+
+def score_news_list(news_list):
+    """对新闻列表进行Claw2打分，返回打分后的列表和汇总统计"""
+    src_acc = load_source_accuracy()
+    scored = []
+    for item in news_list:
+        title = item.get("title", "")
+        content = item.get("content", "")
+        source = item.get("source", "default")
+        std_news = {"source": source, "title": title, "content": content}
+        result = process_news(std_news, src_acc)
+        scored.append(result)
+
+    # 统计
+    if scored:
+        scores = [s.get("predictions_score", 0) for s in scored]
+        avg_score = sum(scores) / len(scores)
+        high = sum(1 for s in scores if s >= 0.6)
+        mid = sum(1 for s in scores if 0.3 <= s < 0.6)
+        low = sum(1 for s in scores if s < 0.3)
+    else:
+        avg_score, high, mid, low = 0, 0, 0, 0
+
+    return scored, {"avg_score": avg_score, "high": high, "mid": mid, "low": low, "total": len(scored)}
+
+
+def score_to_color(score):
+    """分数转颜色"""
+    if score >= 0.7:
+        return "#27ae60"  # 绿色-高确定性
+    elif score >= 0.4:
+        return "#f39c12"  # 橙色-中等
+    else:
+        return "#e74c3c"  # 红色-低确定性/传闻
+
+
+def render_score_bar(score, max_width=100):
+    """渲染分数条"""
+    color = score_to_color(score)
+    pct = min(score, 1.0)
+    width = int(pct * max_width)
+    return f'<span style="display:inline-block;width:{width}px;height:12px;background:{color};border-radius:3px;"></span>'
+
+
+def score_news_to_html(news_list):
+    """将新闻打分结果格式化为可视化HTML"""
+    scored_list, stats = score_news_list(news_list)
+
+    if not scored_list:
+        return "<p>无新闻数据可供打分。</p>", "无新闻数据"
+
+    # 顶部汇总卡片
+    avg = stats["avg_score"]
+    avg_color = score_to_color(avg)
+    level = "高确定性" if avg >= 0.6 else ("中等确定性" if avg >= 0.3 else "低确定性/传闻居多")
+
+    summary_html = f"""
+    <div style="background:#1e1e2e; border-radius:12px; padding:16px 20px; margin-bottom:16px; color:#cdd6f4;">
+        <h3 style="margin:0 0 12px 0; color:#f5c2e7;">🦞 Claw2 新闻情绪评分</h3>
+        <div style="display:flex; gap:20px; flex-wrap:wrap; align-items:center;">
+            <div style="text-align:center;">
+                <div style="font-size:36px; font-weight:bold; color:{avg_color};">{avg:.2f}</div>
+                <div style="font-size:12px; color:#a6adc8;">综合平均分</div>
+                <div style="font-size:13px; color:{avg_color};">{level}</div>
+            </div>
+            <div style="flex:1; min-width:200px;">
+                <div style="margin:4px 0;"><span style="color:#27ae60;">■</span> 高确定性 (≥0.6): <b>{stats['high']}</b> 条</div>
+                <div style="margin:4px 0;"><span style="color:#f39c12;">■</span> 中等确定性 (0.3-0.6): <b>{stats['mid']}</b> 条</div>
+                <div style="margin:4px 0;"><span style="color:#e74c3c;">■</span> 低确定性/传闻 (<0.3): <b>{stats['low']}</b> 条</div>
+                <div style="margin:4px 0; color:#a6adc8;">总计: {stats['total']} 条新闻</div>
+            </div>
+        </div>
+    </div>
+    """
+
+    # 详细表格
+    rows = []
+    for i, item in enumerate(scored_list, 1):
+        score = item.get("predictions_score", 0)
+        color = score_to_color(score)
+        preds = item.get("scored_predictions", [])
+        source = item.get("source", "")
+        title = item.get("title", "")
+
+        # 预测句子详情
+        pred_details = ""
+        if preds:
+            pred_items = []
+            for p in preds[:3]:  # 最多显示3条
+                ps = p.get("score", 0)
+                pt = p.get("text", "")[:60]
+                pc = score_to_color(ps)
+                pred_items.append(f'<span style="color:{pc};">[{ps:.2f}]</span> {pt}')
+            pred_details = "<br>".join(pred_items)
+        else:
+            pred_details = "<span style='color:#6c7086;'>无预测性语句</span>"
+
+        rows.append(f"""
+        <tr style="border-bottom:1px solid #313244;">
+            <td style="padding:8px; vertical-align:top;">{i}</td>
+            <td style="padding:8px; vertical-align:top;">
+                <b>{title[:50]}</b>
+                <br><small style="color:#a6adc8;">{source}</small>
+            </td>
+            <td style="padding:8px; font-size:13px; vertical-align:top;">{pred_details}</td>
+            <td style="padding:8px; text-align:center; vertical-align:top;">
+                <span style="font-size:18px; font-weight:bold; color:{color};">{score:.2f}</span>
+                <br>{render_score_bar(score, 80)}
+            </td>
+        </tr>
+        """)
+
+    table_html = f"""
+    <div style="background:#1e1e2e; border-radius:12px; padding:16px 20px; color:#cdd6f4;">
+        <h4 style="margin:0 0 12px 0;">📋 逐条评分明细</h4>
+        <table style="width:100%; border-collapse:collapse;">
+            <tr style="background:#313244;">
+                <th style="padding:8px; text-align:left;">#</th>
+                <th style="padding:8px; text-align:left;">标题 / 来源</th>
+                <th style="padding:8px; text-align:left;">预测语句 & 单项评分</th>
+                <th style="padding:8px; text-align:center;">综合评分</th>
+            </tr>
+            {''.join(rows)}
+        </table>
+    </div>
+    """
+
+    full_html = summary_html + table_html
+    status_line = f"📊 综合评分 {avg:.2f} | 高:{stats['high']} 中:{stats['mid']} 低:{stats['low']}"
+    return full_html, status_line
+
+
+def get_news_with_score():
+    """Claw2打分按钮回调：采集新闻 → 打分 → 返回可视化HTML"""
+    try:
+        news_df = get_macro_news()
+        if hasattr(news_df, "to_dict"):
+            news_list = news_df.to_dict("records")
+        else:
+            news_list = news_df
+
+        if not news_list:
+            return "<p>⚠️ 未获取到新闻数据。</p>"
+
+        html, _ = score_news_to_html(news_list)
+        return html
+    except Exception as err:
+        return f"<p style='color:red;'>❌ 打分失败: {str(err)}</p>"
 
 def refresh_market():
     """刷新市场数据，返回 DataFrame"""
@@ -174,7 +352,7 @@ def collect_and_report(use_mock, use_llm, selected_sources, use_demo):
     else:
         news = run_daily_collection(use_mock, use_llm, selected_sources)
         if not news:
-            return "❌ 无新闻", "采集失败，未获取到任何新闻", ""
+            return "❌ 无新闻", "采集失败，未获取到任何新闻", "", "<p style='color:red;'>无新闻数据可供打分</p>"
         status_msg = f"✅ 采集完成，共 {len(news)} 条新闻"
 
     # 构建新闻列表 HTML 表格
@@ -201,11 +379,32 @@ def collect_and_report(use_mock, use_llm, selected_sources, use_demo):
     </table>
     """
     report = generate_ai_report(news)
+    # Claw2 新闻打分
+    score_html, score_status = score_news_to_html(news)
     # 保存报告
     date_str = datetime.now().strftime("%Y-%m-%d")
     saved_path = save_report(report, news, date_str)
+    # 保存打分日志
+    scored_file = f"data/reports/score_{date_str}_{datetime.now().strftime('%H%M%S')}.json"
+    scored_list, _ = score_news_list(news)
+    with open(scored_file, "w", encoding="utf-8") as f:
+        json.dump(scored_list, f, ensure_ascii=False, indent=2)
     status_msg += f"\n📄 报告已保存至: {saved_path}"
-    return report, status_msg, news_table
+    status_msg += f"\n📊 打分日志: {scored_file}"
+    status_msg += f"\n{score_status}"
+    return report, status_msg, news_table, score_html
+
+def run_full_analysis_with_score():
+    """运行全部分析 + 评分"""
+    try:
+        final_report = run_full_analysis()
+        score_result = score_finance_report(final_report)
+        combined = final_report + "\n\n---\n\n" + score_result
+        status = "✅ 全部分析完成"
+        return combined, status
+    except Exception as e:
+        return f"❌ 分析失败: {str(e)}", f"❌ 错误: {str(e)}"
+
 
 def create_ui():
     with gr.Blocks(title="Claw 数字员工 - 每日科技股简报", theme=gr.themes.Soft()) as demo:
@@ -223,7 +422,9 @@ def create_ui():
                     value=["AKShare", "财联社", "华尔街见闻", "新浪科技", "36氪", "知乎日报"]
                 )
                 collect_btn = gr.Button("🔄 生成今日简报", variant="primary")
-                status_text = gr.Textbox(label="状态", lines=4)
+                full_analysis_btn = gr.Button("📈 三大Agent全部分析 + 评分", variant="secondary")
+                score_news_btn = gr.Button("📊 Claw2 新闻独立打分", variant="secondary")
+                status_text = gr.Textbox(label="状态", lines=5)
 
             with gr.Column(scale=1):
                 gr.Markdown("### 📊 市场概况")
@@ -238,11 +439,25 @@ def create_ui():
         report_output = gr.Markdown("点击「生成今日简报」开始")
         news_html = gr.HTML("")
 
+        gr.Markdown("---")
+        gr.Markdown("### 🦞 Claw2 新闻情绪评分")
+        score_html = gr.HTML("<p style='color:#888;'>点击「生成今日简报」或「Claw2独立打分」查看评分</p>")
+
         # 绑定事件
         collect_btn.click(
             collect_and_report,
             inputs=[use_mock, use_llm, sources, use_demo],
-            outputs=[report_output, status_text, news_html]
+            outputs=[report_output, status_text, news_html, score_html]
+        )
+        # 三大Agent全部分析按钮绑定
+        full_analysis_btn.click(
+            run_full_analysis_with_score,
+            outputs=[report_output, status_text]
+        )
+        # Claw2新闻独立打分按钮绑定
+        score_news_btn.click(
+            get_news_with_score,
+            outputs=score_html
         )
         refresh_btn.click(refresh_market, outputs=market_table)
 
