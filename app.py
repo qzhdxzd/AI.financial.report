@@ -156,8 +156,12 @@ def run_full_analysis():
 
     return final_report
 
-def score_news_list(news_list):
-    """对新闻列表进行Claw2打分，返回打分后的列表和汇总统计"""
+def score_news_list(news_list, filtered=False):
+    """对新闻列表进行Claw2打分，返回打分后的列表和汇总统计
+    Args:
+        news_list: 新闻列表
+        filtered: 是否已通过DeepSeek筛选（影响信源可信度加成）
+    """
     src_acc = load_source_accuracy()
     scored = []
     for item in news_list:
@@ -165,7 +169,7 @@ def score_news_list(news_list):
         content = item.get("content", "")
         source = item.get("source", "default")
         std_news = {"source": source, "title": title, "content": content}
-        result = process_news(std_news, src_acc)
+        result = process_news(std_news, src_acc, filtered=filtered)
         scored.append(result)
 
     # 统计
@@ -199,9 +203,13 @@ def render_score_bar(score, max_width=100):
     return f'<span style="display:inline-block;width:{width}px;height:12px;background:{color};border-radius:3px;"></span>'
 
 
-def score_news_to_html(news_list):
-    """将新闻打分结果格式化为可视化HTML"""
-    scored_list, stats = score_news_list(news_list)
+def score_news_to_html(news_list, filtered=False):
+    """将新闻打分结果格式化为可视化HTML
+    Args:
+        news_list: 新闻列表
+        filtered: 是否已通过DeepSeek筛选
+    """
+    scored_list, stats = score_news_list(news_list, filtered=filtered)
 
     if not scored_list:
         return "<p>无新闻数据可供打分。</p>", "无新闻数据"
@@ -379,14 +387,15 @@ def collect_and_report(use_mock, use_llm, selected_sources, use_demo):
     </table>
     """
     report = generate_ai_report(news)
-    # Claw2 新闻打分
-    score_html, score_status = score_news_to_html(news)
+    # Claw2 新闻打分（演示模式/采集模式都经过筛选，启用加成）
+    news_filtered = use_demo or use_llm
+    score_html, score_status = score_news_to_html(news, filtered=news_filtered)
     # 保存报告
     date_str = datetime.now().strftime("%Y-%m-%d")
     saved_path = save_report(report, news, date_str)
     # 保存打分日志
     scored_file = f"data/reports/score_{date_str}_{datetime.now().strftime('%H%M%S')}.json"
-    scored_list, _ = score_news_list(news)
+    scored_list, _ = score_news_list(news, filtered=news_filtered)
     with open(scored_file, "w", encoding="utf-8") as f:
         json.dump(scored_list, f, ensure_ascii=False, indent=2)
     status_msg += f"\n📄 报告已保存至: {saved_path}"

@@ -17,24 +17,32 @@ SOURCE_ACCURACY: Dict[str, float] = {
     "default": 0.50
 }
 
-# 确定性系数映射（按关键词长度降序排列，长词优先匹配，避免短词误覆盖）
+# 确定性系数映射 —— 与 EXTRACT_KEYWORDS 保持同步
+# 财经/科技新闻语境下，已发生的事实动作应有高确定性
 CERTAINTY_MAP: Dict[str, float] = {
-    # 高确定性（1.0 - 0.9）
-    "毫无疑问": 1.0, "大幅": 1.0, "明显": 0.95, "确定": 0.95, "必然": 1.0,
-    "强势": 0.9, "正式发布": 0.95,
-    # 中高确定性（0.85 - 0.75）
-    "大概率": 0.85, "有望": 0.8, "计划": 0.8,
-    "预计": 0.75, "预期": 0.75, "拟": 0.75,
-    "或将": 0.7, "即将": 0.7,
-    "可能": 0.65, "准备": 0.65,
-    # 中等确定性（0.7 - 0.6）
-    "将": 0.6, "会": 0.6, "接近": 0.6,
-    # 中低确定性（0.55 - 0.4）
-    "或": 0.5, "或许": 0.45, "考虑": 0.5,
-    "不排除": 0.4,
-    # 低确定性（0.3 - 0.1）
-    "传闻": 0.2, "据传": 0.15, "疑似": 0.2,
-    "default": 0.6
+    # ═══ 高确定性 0.90-1.0：已完成的官方动作 ═══
+    "毫无疑问": 1.0, "必然": 1.0, "确定": 0.95, "正式发布": 0.95, "正式": 0.95,
+    "大幅": 1.0, "明显": 0.95, "强势": 0.95,
+    "达成": 0.92, "推出": 0.90, "申报": 0.90,
+    "上市": 0.90, "获批": 0.95, "发布": 0.90,
+    # ═══ 中高确定性 0.80-0.89：强趋势/明确计划 ═══
+    "大概率": 0.85, "上涨": 0.85, "下跌": 0.85,
+    "增长": 0.85, "下降": 0.85, "突破": 0.85, "跌破": 0.85,
+    "上调": 0.85, "下调": 0.85,
+    "有望": 0.82, "计划": 0.82, "拟": 0.80,
+    "合作": 0.80, "开发": 0.78,
+    # ═══ 中等确定性 0.70-0.79：合理预期 ═══
+    "预计": 0.75, "预期": 0.75, "或将": 0.72,
+    "即将": 0.72, "准备": 0.70, "选择": 0.70,
+    "调整": 0.70, "推进": 0.72,
+    # ═══ 中低确定性 0.55-0.69：推测性表述 ═══
+    "可能": 0.65, "接近": 0.62,
+    "将": 0.60, "会": 0.58, "考虑": 0.55,
+    # ═══ 低确定性 0.30-0.54：不确定/传闻 ═══
+    "或": 0.50, "或许": 0.45, "不排除": 0.40,
+    # ═══ 极低确定性 0.10-0.29：明确传闻 ═══
+    "传闻": 0.20, "据传": 0.18, "疑似": 0.22,
+    "default": 0.75  # 提高默认值：能被提取关键词匹配到的句子，默认就有中等偏上的确定性
 }
 
 # 用于提取句子的关键词（只使用多字关键词，避免单字误匹配）
@@ -80,9 +88,17 @@ def get_certainty_coefficient(text: str) -> float:
         return max(matched_coeffs)
     return CERTAINTY_MAP["default"]
 
-def score_prediction(pred_text: str, source_accuracy: float) -> float:
+# DeepSeek筛选后的信源可信度加成系数
+FILTERED_SOURCE_BOOST = 1.35  # 筛选后的新闻，信源可信度提升35%
+
+
+def score_prediction(pred_text: str, source_accuracy: float, filtered: bool = False) -> float:
+    """对单条预测语句打分 = 信源准确率 × 确定性系数（可选筛选加成）"""
     coeff = get_certainty_coefficient(pred_text)
-    return source_accuracy * coeff
+    if filtered:
+        # 已筛选新闻：提升信源权重，但不超过1.0
+        source_accuracy = min(source_accuracy * FILTERED_SOURCE_BOOST, 1.0)
+    return round(source_accuracy * coeff, 4)
 
 def extract_predictions_from_text(text: str) -> List[str]:
     """
@@ -106,12 +122,19 @@ def extract_predictions_from_text(text: str) -> List[str]:
             seen.add(sent)
     return predictions
 
-def process_news(news: Dict[str, Any], source_acc: Dict[str, float]) -> Dict[str, Any]:
+def process_news(news: Dict[str, Any], source_acc: Dict[str, float],
+                 filtered: bool = False) -> Dict[str, Any]:
+    """对单条新闻打分：提取预测句 → 逐句评分 → 计算综合分
+    Args:
+        news: 新闻字典，需含 source/title/content
+        source_acc: 信源准确率表
+        filtered: 是否已经过DeepSeek等LLM筛选（筛选过的新闻可信度更高）
+    """
     source = news.get("source", "default")
     if source not in source_acc:
         source = "default"
     src_acc = source_acc[source]
-    
+
     # 优先使用已有的 predictions，若为空则自动提取
     existing_preds = news.get("predictions", [])
     if existing_preds:
@@ -121,22 +144,21 @@ def process_news(news: Dict[str, Any], source_acc: Dict[str, float]) -> Dict[str
         content = news.get("content", "")
         combined_text = title + "。" + content
         auto_preds = extract_predictions_from_text(combined_text)
-        # 将提取的结果写回 predictions 字段，便于 Claw3 使用
         news["predictions"] = auto_preds
         predictions = auto_preds
-    
+
     if not predictions:
         news["predictions_score"] = 0.0
         news["scored_predictions"] = []
         return news
-    
+
     scored = []
     total = 0.0
     for pred in predictions:
-        score = score_prediction(pred, src_acc)
-        scored.append({"text": pred, "score": round(score, 4)})
+        score = score_prediction(pred, src_acc, filtered=filtered)
+        scored.append({"text": pred, "score": score})
         total += score
-    
+
     avg_score = total / len(predictions)
     news["predictions_score"] = round(avg_score, 4)
     news["scored_predictions"] = scored
