@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ModelScope 环境优化版科技新闻采集器 v4.1
-- 自动适配 cloudscraper，若不可用则跳过 36kr
-- 优化新浪财经、东方财富、财联社接口，采用更稳定的 7x24 快讯官方 API 
-- 财联社支持 AkShare/Wap双重保底，彻底解决抓取不到大部分数据源的问题
-- 依赖稳定 RSS 源和 AKShare，确保数据量
-- 本地关键词回退，无需 DeepSeek 也能筛选
+ModelScope 环境优化版科技新闻采集器 v4.2
+- 输出格式适配 test_input.json（数组，含 stock_mentioned / predictions / is_fact）
+- 自动提取预测性句子和股票代码
+- 保留原有全部采集源及筛选逻辑
 """
 
 import json
@@ -40,56 +38,66 @@ DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 DEBUG_MODE = os.environ.get("DEBUG", "false").lower() in ("true", "1")
 
-# 保底模拟新闻（3条）
+# ---------- 公司名称 -> 股票代码映射 ----------
+COMPANY_STOCK_MAP = {
+    "英伟达": "NVDA", "NVIDIA": "NVDA", "nvidia": "NVDA",
+    "AMD": "AMD", "amd": "AMD",
+    "英特尔": "INTC", "Intel": "INTC",
+    "苹果": "AAPL", "Apple": "AAPL",
+    "微软": "MSFT", "Microsoft": "MSFT",
+    "谷歌": "GOOGL", "Google": "GOOGL", "Alphabet": "GOOGL",
+    "特斯拉": "TSLA", "Tesla": "TSLA",
+    "台积电": "TSM", "TSMC": "TSM",
+    "中芯国际": "688981", "SMIC": "688981",
+    "阿里巴巴": "BABA", "Alibaba": "BABA",
+    "腾讯": "TCEHY", "Tencent": "TCEHY",
+    "百度": "BIDU", "Baidu": "BIDU",
+    "宁德时代": "300750", "CATL": "300750",
+    "比亚迪": "002594", "BYD": "002594",
+    "华为": "未上市",
+    "高通": "QCOM", "Qualcomm": "QCOM",
+    "美光": "MU", "Micron": "MU",
+    "阿斯麦": "ASML", "ASML": "ASML",
+    "OpenAI": "未上市",
+    "Meta": "META", "Facebook": "META",
+    "亚马逊": "AMZN", "Amazon": "AMZN",
+}
+COMMON_STOCK_PATTERN = re.compile(r'\b([A-Z]{2,5})\b')
+A_STOCK_PATTERN = re.compile(r'\b([0-9]{6})\b')
+
+# 预测关键词
+PREDICTION_KEYWORDS = [
+    "预计", "可能", "或将", "有望", "预期", "预测", "或成为",
+    "将会", "即将", "或达", "或超", "或提升", "或下降", "或加速",
+    "或放缓", "或引发", "或带动", "可能带动", "可能影响", "可能推动"
+]
+
+# ---------- 保底模拟新闻（已适配新格式）----------
 FALLBACK_NEWS = [
     {
         "title": "英伟达发布新一代AI芯片H200，算力提升3倍",
         "content": "英伟达今日宣布推出新一代AI加速卡H200，预计将带动全球AI算力需求大幅增长。",
         "source": "模拟数据",
-        "category": "AI芯片",
-        "sentiment": "positive"
+        "stock_mentioned": ["NVDA"],
+        "is_fact": False,
+        "predictions": ["预计将带动全球AI算力需求大幅增长"]
     },
     {
         "title": "中芯国际季度营收超预期，半导体行业回暖",
         "content": "中芯国际公告显示，三季度营收同比增长34%，超出市场预期，行业景气度回升。",
         "source": "模拟数据",
-        "category": "半导体",
-        "sentiment": "positive"
+        "stock_mentioned": ["688981"],
+        "is_fact": True,
+        "predictions": []
     },
     {
         "title": "工信部：加快推动人工智能与实体经济深度融合",
         "content": "工信部相关负责人表示，下一步将出台更多政策支持AI产业发展，推动大模型在工业场景落地。",
         "source": "模拟数据",
-        "category": "AI",
-        "sentiment": "positive"
+        "stock_mentioned": [],
+        "is_fact": True,
+        "predictions": []
     }
-]
-
-# ---------- 本地关键词过滤器 ----------
-TECH_KEYWORDS = [
-    "人工智能", "AI", "机器学习", "深度学习", "神经网络", "大模型", "ChatGPT", "GPT",
-    "芯片", "半导体", "集成电路", "晶圆", "光刻", "EUV", "GPU", "CPU", "NPU",
-    "计算机", "软件", "硬件", "服务器", "数据中心", "云计算", "边缘计算",
-    "互联网", "移动互联网", "物联网", "IoT", "5G", "6G", "通信", "卫星互联网",
-    "大数据", "数据分析", "数据挖掘", "数据库", "区块链", "Web3",
-    "虚拟现实", "VR", "增强现实", "AR", "混合现实", "MR", "元宇宙",
-    "自动驾驶", "无人驾驶", "智能汽车", "新能源车", "电动车", "动力电池",
-    "机器人", "工业机器人", "人形机器人", "无人机",
-    "生物技术", "基因编辑", "脑机接口", "金融科技", "量化交易",
-    "网络安全", "信息安全", "加密", "漏洞", "黑客",
-    "量子计算", "量子通信", "光子计算",
-    "数字人", "AIGC", "生成式AI",
-    "iPhone", "iOS", "Android", "华为", "小米", "OPPO", "vivo", "三星", "英伟达", "台积电",
-    "特斯拉", "OpenAI", "微软", "谷歌", "Meta", "苹果", "字节跳动", "腾讯", "阿里",
-]
-
-NON_TECH_INDICATORS = [
-    "娱乐", "明星", "影视", "电视剧", "电影", "综艺", "八卦", "绯闻",
-    "体育", "足球", "篮球", "NBA", "世界杯", "奥运会", "田径", "游泳",
-    "美食", "旅游", "酒店", "时尚", "美妆", "穿搭",
-    "汽车评测", "房产", "家居", "装修", "教育政策", "考试", "留学",
-    "育儿", "健康", "养生", "医疗", "疫情", "疫苗", "中医",
-    "天气", "交通管制", "限行", "菜价", "油价",
 ]
 
 # ---------- 工具函数 ----------
@@ -98,6 +106,77 @@ def is_similar(t1: str, t2: str, thresh: float = 0.6) -> bool:
 
 def clean_text(text: str) -> str:
     return re.sub(r'\s+', ' ', text or '').strip()
+
+def format_timestamp(ts: any) -> str:
+    """统一转为 '%Y-%m-%d %H:%M:%S'"""
+    if not ts:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        if isinstance(ts, str):
+            if 'T' in ts:
+                dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+            else:
+                dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+        elif isinstance(ts, (int, float)):
+            dt = datetime.fromtimestamp(ts)
+        else:
+            dt = datetime.now()
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def extract_stock_mentioned(text: str, title: str = "") -> List[str]:
+    """从文本中提取股票代码（基于映射表 + 常见模式）"""
+    combined = f"{title} {text}".lower()
+    mentioned = set()
+    # 公司名称映射
+    for company, code in COMPANY_STOCK_MAP.items():
+        if company.lower() in combined and code != "未上市":
+            mentioned.add(code)
+    # 美股模式
+    upper_text = f"{title} {text}"
+    for match in COMMON_STOCK_PATTERN.finditer(upper_text):
+        code = match.group(1)
+        if code not in {"THE", "AND", "FOR", "NOT", "BUT", "ARE", "WAS", "CAN", "HOW", "WHY", "ALL", "ANY"}:
+            mentioned.add(code)
+    # A股6位数字
+    for match in A_STOCK_PATTERN.finditer(combined):
+        mentioned.add(match.group(1))
+    return list(mentioned)
+
+def extract_predictions(text: str) -> List[str]:
+    """提取包含预测关键词的句子"""
+    if not text:
+        return []
+    sentences = re.split(r'[。；!?；\n]', text)
+    preds = []
+    for sent in sentences:
+        sent = sent.strip()
+        if not sent:
+            continue
+        if any(kw in sent for kw in PREDICTION_KEYWORDS):
+            if sent not in preds and len(sent) < 150:
+                preds.append(sent)
+    return preds
+
+def convert_to_input_format(item: Dict) -> Dict:
+    """将内部新闻条目转换为 test_input.json 所需格式"""
+    title = clean_text(item.get('title', '无标题'))
+    content = clean_text(item.get('content', ''))
+    full_text = f"{title} {content}"
+    predictions = extract_predictions(full_text)
+    stock_mentioned = extract_stock_mentioned(full_text, title)
+    is_fact = len(predictions) == 0
+    return {
+        "id": item.get('id', hashlib.md5(f"{title}{item.get('source','')}".encode()).hexdigest()[:16]),
+        "timestamp": format_timestamp(item.get('timestamp')),
+        "source": item.get('source', '未知'),
+        "title": title,
+        "content": content if content else title,
+        "stock_mentioned": stock_mentioned,
+        "is_fact": is_fact,
+        "predictions": predictions
+    }
 
 # 全局 Session
 session = requests.Session()
@@ -122,6 +201,7 @@ def safe_request(url: str, timeout: int = 15, headers: Optional[dict] = None) ->
         time.sleep(1)
     return None
 
+# ---------- DeepSeek 相关函数（与原始保持一致）----------
 def call_deepseek(prompt: str, max_tokens: int = 80) -> Optional[str]:
     if not DEEPSEEK_API_KEY:
         return None
@@ -143,6 +223,30 @@ def call_deepseek(prompt: str, max_tokens: int = 80) -> Optional[str]:
 
 def local_classify(title: str, content: str) -> Tuple[bool, str, str]:
     text = f"{title} {content}".lower()
+    NON_TECH_INDICATORS = [
+        "娱乐", "明星", "影视", "电视剧", "电影", "综艺", "八卦", "绯闻",
+        "体育", "足球", "篮球", "NBA", "世界杯", "奥运会", "田径", "游泳",
+        "美食", "旅游", "酒店", "时尚", "美妆", "穿搭",
+        "汽车评测", "房产", "家居", "装修", "教育政策", "考试", "留学",
+        "育儿", "健康", "养生", "医疗", "疫情", "疫苗", "中医",
+        "天气", "交通管制", "限行", "菜价", "油价",
+    ]
+    TECH_KEYWORDS = [
+        "人工智能", "AI", "机器学习", "深度学习", "神经网络", "大模型", "ChatGPT", "GPT",
+        "芯片", "半导体", "集成电路", "晶圆", "光刻", "EUV", "GPU", "CPU", "NPU",
+        "计算机", "软件", "硬件", "服务器", "数据中心", "云计算", "边缘计算",
+        "互联网", "移动互联网", "物联网", "IoT", "5G", "6G", "通信", "卫星互联网",
+        "大数据", "数据分析", "数据挖掘", "数据库", "区块链", "Web3",
+        "虚拟现实", "VR", "增强现实", "AR", "混合现实", "MR", "元宇宙",
+        "自动驾驶", "无人驾驶", "智能汽车", "新能源车", "电动车", "动力电池",
+        "机器人", "工业机器人", "人形机器人", "无人机",
+        "生物技术", "基因编辑", "脑机接口", "金融科技", "量化交易",
+        "网络安全", "信息安全", "加密", "漏洞", "黑客",
+        "量子计算", "量子通信", "光子计算",
+        "数字人", "AIGC", "生成式AI",
+        "iPhone", "iOS", "Android", "华为", "小米", "OPPO", "vivo", "三星", "英伟达", "台积电",
+        "特斯拉", "OpenAI", "微软", "谷歌", "Meta", "苹果", "字节跳动", "腾讯", "阿里",
+    ]
     for w in NON_TECH_INDICATORS:
         if w in text:
             return (False, "非科技", "neutral")
@@ -153,7 +257,6 @@ def local_classify(title: str, content: str) -> Tuple[bool, str, str]:
             break
     else:
         return (False, "非科技", "neutral")
-    # 情感
     pos_words = ["突破", "发布", "增长", "提升", "利好", "创新", "合作", "投资", "上市", "交付"]
     neg_words = ["下滑", "暴跌", "亏损", "裁员", "诉讼", "违规", "召回", "漏洞", "攻击", "禁用"]
     pos_cnt = sum(1 for w in pos_words if w in text)
@@ -181,6 +284,7 @@ def deepseek_classify(title: str, content: str) -> Tuple[bool, str, str]:
     try:
         data = json.loads(result)
         is_tech = data.get("is_tech", False)
+        NON_TECH_INDICATORS = ["娱乐", "明星", "影视", "体育", "美食", "旅游", "房产", "教育", "育儿", "健康", "天气"]
         if not is_tech and any(ind in f"{title}{content}".lower() for ind in NON_TECH_INDICATORS):
             return (False, "非科技", "neutral")
         return (is_tech, data.get("category", "科技"), data.get("sentiment", "neutral"))
@@ -250,9 +354,6 @@ def fetch_tushare() -> List[Dict]:
         return []
 
 def fetch_eastmoney() -> List[Dict]:
-    """
-    通过东方财富快讯官方 API 采集（替换原有不稳定且内容残缺的 AJAX 分页接口）
-    """
     try:
         url = "https://fastnews.eastmoney.com/api/FastNews/GetFastNewsList?pageIndex=1&pageSize=30&ShowType=1"
         headers = {
@@ -269,7 +370,6 @@ def fetch_eastmoney() -> List[Dict]:
             raw_summary = clean_text(item.get('Digest', ''))
             if not title and not raw_summary:
                 continue
-            
             raw_content = raw_summary if raw_summary else title
             content = deepseek_summarize(raw_content)
             news.append({
@@ -285,11 +385,7 @@ def fetch_eastmoney() -> List[Dict]:
         return []
 
 def fetch_sina_finance() -> List[Dict]:
-    """
-    通过新浪财经 7x24 快讯公开最新 JSON API 采集（规避旧滚动接口 403 频率限制）
-    """
     try:
-        # zhibo_id=152 代表全天候综合财经/科技快讯流
         url = "https://zhibo.sina.com.cn/api/zhibo/feed?page=1&page_size=30&zhibo_id=152"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -350,7 +446,6 @@ def fetch_wallstreetcn() -> List[Dict]:
                 return news
         except Exception as e:
             print(f"   华尔街见闻 API 失败: {e}")
-    # 网页回退
     try:
         resp = safe_request("https://www.wallstreetcn.com/live/global")
         if not resp:
@@ -374,7 +469,6 @@ def fetch_wallstreetcn() -> List[Dict]:
         print(f"   华尔街见闻网页失败: {e}")
         return []
 
-# RSS 稳定源
 def fetch_rss_sina_tech() -> List[Dict]:
     try:
         resp = safe_request("https://tech.sina.com.cn/rss/")
@@ -447,7 +541,6 @@ def fetch_rss_huxiu() -> List[Dict]:
         print(f"   虎嗅RSS失败: {e}")
         return []
 
-# 其他网页源（需 BS4 解析）
 def fetch_tencent_tech() -> List[Dict]:
     try:
         resp = safe_request("https://tech.qq.com/")
@@ -497,15 +590,7 @@ def fetch_it_home() -> List[Dict]:
         return []
 
 def fetch_cls() -> List[Dict]:
-    """
-    财联社多保底采集：
-    1. 优先尝试 AkShare 的内置算法解密方案（最稳定且无视 Cloudflare 风控）
-    2. 若失效则请求免签的手机端 Wap 接口（无需 cloudscraper 支持）
-    3. 最后退回到原有 PC 网页端 cloudscraper 爬取逻辑
-    """
     news = []
-
-    # 方案一：使用 AkShare 自带的财联社电报解析接口
     if AKSHARE_AVAILABLE:
         try:
             df = ak.stock_telegraph_cls()
@@ -530,8 +615,6 @@ def fetch_cls() -> List[Dict]:
         except Exception as e:
             if DEBUG_MODE:
                 print(f"       [DEBUG] 财联社 AkShare 接口失败，尝试下一方案: {e}")
-
-    # 方案二：直接通过移动端公开的轻量版 Wap 接口（对反爬和 CF 极其宽松）
     try:
         url = f"https://www.cls.cn/v1/roll/get_roll_list?category=express&last_time={int(time.time())}"
         headers = {
@@ -563,8 +646,6 @@ def fetch_cls() -> List[Dict]:
     except Exception as e:
         if DEBUG_MODE:
             print(f"       [DEBUG] 财联社 Wap 接口失败，尝试下一方案: {e}")
-
-    # 方案三：退回原有 cloudscraper 方案
     if CLOUDSCRAPER_AVAILABLE:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -644,7 +725,6 @@ class TechNewsCollector:
     def __init__(self, use_mock=False, use_llm_filter=True, selected_sources=None):
         self.use_mock = use_mock
         self.use_llm_filter = use_llm_filter and bool(DEEPSEEK_API_KEY)
-        # 默认源：将财联社移回默认列表，因为即便没有 cloudscraper，它依然可以通过 AkShare/Wap 独立平稳工作
         if selected_sources is None:
             selected_sources = [
                 "AKShare", "Tushare", "东方财富", "新浪财经",
@@ -660,23 +740,21 @@ class TechNewsCollector:
         else:
             print("✓ DeepSeek API 已配置")
 
-    def _get_fallback_news(self):
-        now = datetime.now().isoformat()
-        return [{
-            "id": f"fallback_{i}",
-            "timestamp": now,
-            "source": item["source"],
-            "title": item["title"],
-            "content": item["content"],
-            "url": "",
-            "stock_mentioned": [],
-            "is_fact": True,
-            "predictive_sentences": [],
-            "tech_category": item.get("category", "科技"),
-            "tech_sentiment": item.get("sentiment", "neutral"),
-            "prediction_score": 0.0,
-            "impact_score": 0.0
-        } for i, item in enumerate(FALLBACK_NEWS)]
+    def _get_fallback_news(self) -> List[Dict]:
+        now = format_timestamp(datetime.now())
+        result = []
+        for idx, item in enumerate(FALLBACK_NEWS):
+            result.append({
+                "id": f"fallback_{idx}",
+                "timestamp": now,
+                "source": item["source"],
+                "title": item["title"],
+                "content": item["content"],
+                "stock_mentioned": item.get("stock_mentioned", []),
+                "is_fact": item.get("is_fact", True),
+                "predictions": item.get("predictions", [])
+            })
+        return result
 
     def collect(self) -> List[Dict]:
         if self.use_mock:
@@ -729,73 +807,74 @@ class TechNewsCollector:
 
         # 筛选科技新闻
         print("\n--- 筛选科技新闻 ---")
-        final_news = []
+        tech_news = []
         for idx, item in enumerate(all_news):
             if DEBUG_MODE and idx % 10 == 0:
                 print(f"  筛选进度: {idx+1}/{len(all_news)}")
             is_tech, cat, sent = deepseek_classify(item['title'], item.get('content', ''))
             if is_tech:
                 uid = hashlib.md5(f"{item['title']}{item.get('source','')}".encode()).hexdigest()[:16]
-                final_news.append({
+                tech_news.append({
                     "id": uid,
-                    "timestamp": item['timestamp'],
-                    "source": item['source'],
+                    "timestamp": item.get('timestamp', datetime.now()),
+                    "source": item.get('source', '未知'),
                     "title": item['title'],
-                    "content": item['content'],
-                    "url": item['url'],
-                    "stock_mentioned": [],
-                    "is_fact": False,
-                    "predictive_sentences": [],
+                    "content": item.get('content', ''),
+                    "url": item.get('url', ''),
                     "tech_category": cat,
                     "tech_sentiment": sent,
-                    "prediction_score": 0.0,
-                    "impact_score": 0.0
                 })
 
         # 去重
         unique = []
-        for n in final_news:
+        for n in tech_news:
             if not any(is_similar(n['title'], u['title']) for u in unique):
                 unique.append(n)
 
-        # 保底
+        # 保底数量
         if len(unique) < 5:
             print(f"⚠️ 最终科技新闻仅 {len(unique)} 条，补充模拟数据")
             fallback = self._get_fallback_news()
             exist_titles = {u['title'] for u in unique}
             for fb in fallback:
                 if fb['title'] not in exist_titles:
-                    unique.append(fb)
+                    unique.append({
+                        "id": fb['id'],
+                        "timestamp": fb['timestamp'],
+                        "source": fb['source'],
+                        "title": fb['title'],
+                        "content": fb['content'],
+                        "url": "",
+                        "tech_category": "科技",
+                        "tech_sentiment": "neutral",
+                    })
                     if len(unique) >= 5:
                         break
 
-        print(f"\n=== 最终输出科技新闻: {len(unique)} 条 ===")
+        # 转换为最终 input 格式
+        final_list = [convert_to_input_format(item) for item in unique]
+
+        print(f"\n=== 最终输出科技新闻: {len(final_list)} 条 ===")
         src_dist = {}
-        for n in unique:
+        for n in final_list:
             src_dist[n['source']] = src_dist.get(n['source'], 0) + 1
         for src, cnt in src_dist.items():
             print(f"  {src}: {cnt}")
-        return unique
+        return final_list
 
 # ==================== 入口 ====================
 def main():
     import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--output', '-o', default='data/news.json')
+    parser = argparse.ArgumentParser(description="科技新闻采集器，输出格式为 test_input.json 数组")
+    parser.add_argument('--output', '-o', default='data/news.json', help="输出 JSON 文件路径（数组格式）")
     parser.add_argument('--mock', action='store_true', help='使用模拟数据')
     args = parser.parse_args()
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     collector = TechNewsCollector(use_mock=args.mock)
     news_list = collector.collect()
-    output = {
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "timestamp": datetime.now().isoformat(),
-        "total": len(news_list),
-        "news": news_list
-    }
     with open(args.output, 'w', encoding='utf-8') as f:
-        json.dump(output, f, ensure_ascii=False, indent=2)
-    print(f"✅ 保存至 {args.output}")
+        json.dump(news_list, f, ensure_ascii=False, indent=2)
+    print(f"✅ 已生成 {len(news_list)} 条新闻，保存至 {args.output}")
 
 if __name__ == "__main__":
     main()
