@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-from agent_utils import agent_market_analysis, agent_board_analysis, agent_stock_analysis, agent_summary
-from skills.score_skill import score_finance_report
-from data_utils import get_all_data
 import json
 import os
 from datetime import datetime
@@ -9,9 +6,6 @@ import gradio as gr
 import pandas as pd
 import requests
 from skills.tech_news_collector.collector import TechNewsCollector, FALLBACK_NEWS
-# 导入Claw2 新闻打分相关函数
-from news_score import process_news, load_source_accuracy
-from data_utils import get_macro_news
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
@@ -131,59 +125,6 @@ def save_report(report_text, news_list, date_str):
         f.write("\n## AI分析报告\n\n")
         f.write(report_text)
     return filename
-def run_full_analysis():
-    """一键执行：数据获取 → 三大Agent分析 → 生成最终报告"""
-    # 1. 获取全部数据
-    all_data = get_all_data()
-    index_data = all_data["大盘指数"]
-    news_data = all_data["宏观新闻"]
-    board_data = all_data["行业板块"]
-    stock_data = all_data["个股行情"]
-    finance_data = all_data["个股财报"]
-
-    # 2. 调用三位成员对应的分析函数
-    res_market = agent_market_analysis(index_data, news_data)  
-    res_board = agent_board_analysis(board_data)              
-    res_stock = agent_stock_analysis(stock_data, finance_data)  
-
-    # 3. 汇总成最终报告
-    final_report = agent_summary(res_market, res_board, res_stock)
-
-    # 4. 自动保存到历史记录（全队共用）
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    news_list = [{"title": news_data, "source": "宏观新闻汇总"}]
-    save_report(final_report, news_list, date_str)
-
-    return final_report
-
-def get_news_with_score():
-    try:
-        news_df = get_macro_news()
-        src_acc = load_source_accuracy()
-        all_result = []
-        # 判断是不是DataFrame，转成字典列表
-        if hasattr(news_df, "to_dict"):
-            news_list = news_df.to_dict("records")
-        else:
-            news_list = news_df
-
-        for single_news in news_list:
-            # 兼容中英文键名：有的接口返回"title"，有的返回"标题"
-            title = single_news.get("title", single_news.get("标题", ""))
-            content = single_news.get("content", single_news.get("内容", ""))
-            source = single_news.get("source", single_news.get("来源", "default"))
-            # 组装标准字典传给process_news
-            std_news = {
-                "source": source,
-                "title": title,
-                "content": content
-            }
-            scored_item = process_news(std_news, src_acc)
-            all_result.append(scored_item)
-
-        return json.dumps(all_result, ensure_ascii=False, indent=2)
-    except Exception as err:
-        return f"打分失败，详细错误：{str(err)}"
 
 def refresh_market():
     """刷新市场数据，返回 DataFrame"""
@@ -266,18 +207,6 @@ def collect_and_report(use_mock, use_llm, selected_sources, use_demo):
     status_msg += f"\n📄 报告已保存至: {saved_path}"
     return report, status_msg, news_table
 
-def run_full_analysis_with_score():
-    """运行全部分析 + 评分"""
-    try:
-        final_report = run_full_analysis()
-        score_result = score_finance_report(final_report)
-        combined = final_report + "\n\n---\n\n" + score_result
-        status = "✅ 全部分析完成"
-        return combined, status
-    except Exception as e:
-        return f"❌ 分析失败: {str(e)}", f"❌ 错误: {str(e)}"
-
-
 def create_ui():
     with gr.Blocks(title="Claw 数字员工 - 每日科技股简报", theme=gr.themes.Soft()) as demo:
         gr.Markdown("# 🦞 Claw 数字员工 - 每日科技股简报系统")
@@ -294,7 +223,6 @@ def create_ui():
                     value=["AKShare", "财联社", "华尔街见闻", "新浪科技", "36氪", "知乎日报"]
                 )
                 collect_btn = gr.Button("🔄 生成今日简报", variant="primary")
-                full_analysis_btn = gr.Button("📈 三大Agent全部分析 + 评分", variant="secondary")
                 status_text = gr.Textbox(label="状态", lines=4)
 
             with gr.Column(scale=1):
@@ -305,10 +233,6 @@ def create_ui():
                     interactive=False
                 )
                 refresh_btn = gr.Button("🔄 刷新市场数据")
-                # 新增：Claw2新闻打分展示框
-                news_score_text = gr.Textbox(label="Claw2 新闻情绪打分结果", lines=5)
-                # 新增：打分按钮
-                score_news_btn = gr.Button("📊 新闻智能打分(Claw2)")
 
         gr.Markdown("### 📋 AI 智能简报")
         report_output = gr.Markdown("点击「生成今日简报」开始")
@@ -319,16 +243,6 @@ def create_ui():
             collect_and_report,
             inputs=[use_mock, use_llm, sources, use_demo],
             outputs=[report_output, status_text, news_html]
-        )
-        # 三大Agent全部分析按钮绑定
-        full_analysis_btn.click(
-            run_full_analysis_with_score,
-            outputs=[report_output, status_text]
-        )
-        # Claw2新闻打分按钮绑定
-        score_news_btn.click(
-            get_news_with_score,
-            outputs=news_score_text
         )
         refresh_btn.click(refresh_market, outputs=market_table)
 
