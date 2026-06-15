@@ -1,0 +1,21 @@
+{
+  "name": "market_analyzer",
+  "description": "整合新闻与股票数据，按板块聚合情绪评分，生成市场分析结果",
+  "version": "1.0.0",
+  "author": "启真湖底小纵队",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "news_file": {
+        "type": "string",
+        "description": "Claw1 输出的新闻 JSON 文件路径",
+        "default": "data/news.json"
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "description": "返回包含日期、新闻总数、板块评分、Top 新闻的 JSON 对象"
+  },
+  "execute": "python3 -m skills.market_analyzer.analyzer"
+}

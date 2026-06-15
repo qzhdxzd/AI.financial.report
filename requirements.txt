@@ -13,3 +13,5 @@ protobuf<5.0.0
 click<8.2.0
 tushare
 cloudscraper
+plotly>=5.0.0
+kaleido>=0.2.0

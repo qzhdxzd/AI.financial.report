@@ -1,79 +1,95 @@
 #!/usr/bin/env python3
-from agent_utils import agent_market_analysis, agent_board_analysis, agent_stock_analysis, agent_summary
+from agent_utils import agent_market_analysis, agent_board_analysis, agent_stock_analysis, agent_summary, llm_chat
 from skills.score_skill import score_finance_report
 from data_utils import get_all_data
 import json
 import os
+import sys
 from datetime import datetime
 import gradio as gr
 import pandas as pd
-import requests
 from skills.tech_news_collector.collector import TechNewsCollector, FALLBACK_NEWS
 # 导入Claw2 新闻打分相关函数
 from news_score import process_news, load_source_accuracy
 from data_utils import get_macro_news
+from chart_utils import plot_kline, plot_macd, plot_volume_analysis, plot_index_overview
+from qa_engine import answer as qa_answer
 
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+
+# ---------- 跨平台安全打印（Windows GBK / Linux UTF-8 兼容）----------
+def safe_print(*args, **kwargs):
+    """安全打印，自动处理终端编码不兼容字符"""
+    try:
+        print(*args, **kwargs)
+    except UnicodeEncodeError:
+        text = ' '.join(str(a) for a in args)
+        print(text.encode(sys.stdout.encoding or 'utf-8', errors='replace').decode(
+            sys.stdout.encoding or 'utf-8', errors='replace'), **kwargs)
+
 
 def get_live_market_data():
-    """获取实时大盘数据（兼容新版akshare）"""
-    try:
-        import akshare as ak
-        # 尝试获取上证指数和深证成指数据
-        # 使用更稳定的数据接口
-        stock_sh = ak.stock_zh_index_daily(symbol="sh000001")
-        stock_sz = ak.stock_zh_index_daily(symbol="sz399001")
-        
-        # 获取最新数据
-        latest_sh = stock_sh.iloc[-1] if not stock_sh.empty else None
-        latest_sz = stock_sz.iloc[-1] if not stock_sz.empty else None
-        
-        if latest_sh is not None and latest_sz is not None:
-            sh_close = latest_sh['close']
-            sh_chg = ((latest_sh['close'] - latest_sh['pre_close']) / latest_sh['pre_close']) * 100 if latest_sh['pre_close'] != 0 else 0
-            sz_close = latest_sz['close']
-            sz_chg = ((latest_sz['close'] - latest_sz['pre_close']) / latest_sz['pre_close']) * 100 if latest_sz['pre_close'] != 0 else 0
-            return sh_close, sh_chg, sz_close, sz_chg
-        else:
-            # 如果上述方法失败，尝试另一种方法
-            df = ak.stock_zh_a_spot()
-            sh = df[df['代码'] == 'sh000001']
-            sz = df[df['代码'] == 'sz399001']
-            sh_close = sh['最新价'].iloc[0] if not sh.empty else "--"
-            sh_chg = sh['涨跌幅'].iloc[0] if not sh.empty else 0
-            sz_close = sz['最新价'].iloc[0] if not sz.empty else "--"
-            sz_chg = sz['涨跌幅'].iloc[0] if not sz.empty else 0
-            return sh_close, sh_chg, sz_close, sz_chg
-    except Exception as e:
-        print(f"市场数据获取失败: {e}")
-        # 备用数据 - 使用更真实的模拟数据
-        import random
-        base_sh = 3200 + random.uniform(-100, 100)
-        base_sz = 10500 + random.uniform(-200, 200)
-        chg_sh = random.uniform(-2, 2)
-        chg_sz = random.uniform(-2, 2)
-        return round(base_sh, 2), round(chg_sh, 2), round(base_sz, 2), round(chg_sz, 2)
+    """获取实时大盘数据（多级回退，确保数据真实）"""
+    import akshare as ak
 
-def call_deepseek(prompt: str, max_tokens=1500) -> str:
-    if not DEEPSEEK_API_KEY:
-        return "⚠️ 未配置 DeepSeek API Key，请在环境变量中设置 DEEPSEEK_API_KEY"
-    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
-    payload = {
-        "model": "deepseek-chat",
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
-        "temperature": 0.7
-    }
+    # ---- 方案1：stock_zh_index_spot_em（最新版akshare推荐，实时行情）----
     try:
-        resp = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=30)
-        if resp.status_code == 200:
-            return resp.json()["choices"][0]["message"]["content"]
-        else:
-            error = resp.json().get("error", {}).get("message", "未知错误")
-            return f"⚠️ API 调用失败: {error}"
-    except Exception as e:
-        return f"⚠️ 请求异常: {e}"
+        df_spot = ak.stock_zh_index_spot_em()
+        # 精确匹配指数名称（避免 contains 匹配到 上证信息/上证材料 等）
+        sh_row = df_spot[df_spot['名称'].isin(['上证指数', '上证综指'])]
+        sz_row = df_spot[df_spot['名称'] == '深证成指']
+        # 如果深证成指名称匹配不到，尝试用代码匹配
+        if sz_row.empty:
+            sz_row = df_spot[df_spot['代码'].isin(['399001', 'sz399001'])]
+        if not sh_row.empty and not sz_row.empty:
+            sh_close = float(sh_row['最新价'].iloc[0])
+            sh_chg = float(sh_row['涨跌幅'].iloc[0])
+            sz_close = float(sz_row['最新价'].iloc[0])
+            sz_chg = float(sz_row['涨跌幅'].iloc[0])
+            safe_print(f"[market] spot_em OK: SH={sh_close}({sh_chg:+.2f}%) SZ={sz_close}({sz_chg:+.2f}%)")
+            return sh_close, sh_chg, sz_close, sz_chg
+    except Exception as e1:
+        safe_print(f"[market] spot_em fail: {e1}")
+
+    # ---- 方案2：stock_zh_index_daily（历史日线）----
+    for sh_sym, sz_sym in [("sh000001", "sz399001"), ("000001", "399001")]:
+        try:
+            stock_sh = ak.stock_zh_index_daily(symbol=sh_sym)
+            stock_sz = ak.stock_zh_index_daily(symbol=sz_sym)
+            if (stock_sh is not None and not stock_sh.empty and
+                    stock_sz is not None and not stock_sz.empty):
+                latest_sh = stock_sh.iloc[-1]
+                latest_sz = stock_sz.iloc[-1]
+                sh_close = latest_sh['close']
+                pre_sh = latest_sh.get('pre_close', latest_sh.get('open', latest_sh['close']))
+                sh_chg = ((sh_close - pre_sh) / pre_sh) * 100 if pre_sh != 0 else 0
+                sz_close = latest_sz['close']
+                pre_sz = latest_sz.get('pre_close', latest_sz.get('open', latest_sz['close']))
+                sz_chg = ((sz_close - pre_sz) / pre_sz) * 100 if pre_sz != 0 else 0
+                safe_print(f"[market] index_daily OK: SH={sh_close}({sh_chg:+.2f}%) SZ={sz_close}({sz_chg:+.2f}%)")
+                return sh_close, sh_chg, sz_close, sz_chg
+        except Exception:
+            continue
+
+    # ---- 方案3：stock_zh_a_spot（全A股实时行情）----
+    try:
+        df = ak.stock_zh_a_spot()
+        for sh_code, sz_code in [('sh000001', 'sz399001'), ('000001', '399001')]:
+            sh = df[df['代码'] == sh_code]
+            sz = df[df['代码'] == sz_code]
+            if not sh.empty and not sz.empty:
+                sh_close = sh['最新价'].iloc[0]
+                sh_chg = sh['涨跌幅'].iloc[0]
+                sz_close = sz['最新价'].iloc[0]
+                sz_chg = sz['涨跌幅'].iloc[0]
+                safe_print(f"[market] zh_a_spot OK: SH={sh_close}({sh_chg:+.2f}%) SZ={sz_close}({sz_chg:+.2f}%)")
+                return sh_close, sh_chg, sz_close, sz_chg
+    except Exception as e3:
+        safe_print(f"[market] zh_a_spot fail: {e3}")
+
+    # ---- 全部失败：返回错误标识，绝不编造数据 ----
+    safe_print("[market] All sources failed - check network or akshare version")
+    return None, None, None, None
+
 
 def generate_ai_report(news_list):
     """使用 DeepSeek 生成每日简报"""
@@ -102,8 +118,8 @@ def generate_ai_report(news_list):
 （给出明确的操作建议）
 
 注意：日期必须使用 {today}，不要使用训练数据中的日期。回答要简洁、专业。"""
-    result = call_deepseek(prompt, max_tokens=1500)
-    if result.startswith(("⚠️", "API 调用失败", "请求异常")):
+    result = llm_chat(prompt, max_tokens=1500)
+    if result.startswith(("API", "Request", "未配置")):
         # 降级模板
         return f"""### 一、市场情绪概览
 科技板块整体情绪积极。
@@ -118,21 +134,24 @@ def generate_ai_report(news_list):
 关注AI芯片ETF、半导体ETF。"""
     return result
 
+
 def save_report(report_text, news_list, date_str):
     """保存报告到 Markdown 文件"""
     os.makedirs("data/reports", exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"data/reports/report_{date_str}_{timestamp}.md"
     with open(filename, "w", encoding="utf-8") as f:
-        f.write(f"# 每日科技简报\n\n**生成时间**: {datetime.now().isoformat()}\n\n")
+        f.write(f"# Claw 每日科技简报\n\n**生成时间**: {datetime.now().isoformat()}\n\n")
         f.write(f"## 新闻列表（{len(news_list)}条）\n\n")
         for item in news_list:
             f.write(f"- {item.get('title')} ({item.get('source')})\n")
         f.write("\n## AI分析报告\n\n")
         f.write(report_text)
     return filename
+
+
 def run_full_analysis():
-    """一键执行：数据获取 → 三大Agent分析 → 生成最终报告"""
+    """一键执行：数据获取 -> 三大Agent分析 -> 生成最终报告"""
     # 1. 获取全部数据
     all_data = get_all_data()
     index_data = all_data["大盘指数"]
@@ -142,26 +161,23 @@ def run_full_analysis():
     finance_data = all_data["个股财报"]
 
     # 2. 调用三位成员对应的分析函数
-    res_market = agent_market_analysis(index_data, news_data)  
-    res_board = agent_board_analysis(board_data)              
-    res_stock = agent_stock_analysis(stock_data, finance_data)  
+    res_market = agent_market_analysis(index_data, news_data)
+    res_board = agent_board_analysis(board_data)
+    res_stock = agent_stock_analysis(stock_data, finance_data)
 
     # 3. 汇总成最终报告
     final_report = agent_summary(res_market, res_board, res_stock)
 
-    # 4. 自动保存到历史记录（全队共用）
+    # 4. 自动保存到历史记录
     date_str = datetime.now().strftime("%Y-%m-%d")
     news_list = [{"title": news_data, "source": "宏观新闻汇总"}]
     save_report(final_report, news_list, date_str)
 
     return final_report
 
+
 def score_news_list(news_list, filtered=False):
-    """对新闻列表进行Claw2打分，返回打分后的列表和汇总统计
-    Args:
-        news_list: 新闻列表
-        filtered: 是否已通过DeepSeek筛选（影响信源可信度加成）
-    """
+    """对新闻列表进行Claw2打分，返回打分后的列表和汇总统计"""
     src_acc = load_source_accuracy()
     scored = []
     for item in news_list:
@@ -172,7 +188,6 @@ def score_news_list(news_list, filtered=False):
         result = process_news(std_news, src_acc, filtered=filtered)
         scored.append(result)
 
-    # 统计
     if scored:
         scores = [s.get("predictions_score", 0) for s in scored]
         avg_score = sum(scores) / len(scores)
@@ -188,11 +203,11 @@ def score_news_list(news_list, filtered=False):
 def score_to_color(score):
     """分数转颜色"""
     if score >= 0.7:
-        return "#27ae60"  # 绿色-高确定性
+        return "#27ae60"
     elif score >= 0.4:
-        return "#f39c12"  # 橙色-中等
+        return "#f39c12"
     else:
-        return "#e74c3c"  # 红色-低确定性/传闻
+        return "#e74c3c"
 
 
 def render_score_bar(score, max_width=100):
@@ -204,11 +219,7 @@ def render_score_bar(score, max_width=100):
 
 
 def score_news_to_html(news_list, filtered=False):
-    """将新闻打分结果格式化为可视化HTML
-    Args:
-        news_list: 新闻列表
-        filtered: 是否已通过DeepSeek筛选
-    """
+    """将新闻打分结果格式化为可视化HTML"""
     scored_list, stats = score_news_list(news_list, filtered=filtered)
 
     if not scored_list:
@@ -221,7 +232,7 @@ def score_news_to_html(news_list, filtered=False):
 
     summary_html = f"""
     <div style="background:#1e1e2e; border-radius:12px; padding:16px 20px; margin-bottom:16px; color:#cdd6f4;">
-        <h3 style="margin:0 0 12px 0; color:#f5c2e7;">🦞 Claw2 新闻情绪评分</h3>
+        <h3 style="margin:0 0 12px 0; color:#f5c2e7;">Claw2 新闻情绪评分</h3>
         <div style="display:flex; gap:20px; flex-wrap:wrap; align-items:center;">
             <div style="text-align:center;">
                 <div style="font-size:36px; font-weight:bold; color:{avg_color};">{avg:.2f}</div>
@@ -229,9 +240,9 @@ def score_news_to_html(news_list, filtered=False):
                 <div style="font-size:13px; color:{avg_color};">{level}</div>
             </div>
             <div style="flex:1; min-width:200px;">
-                <div style="margin:4px 0;"><span style="color:#27ae60;">■</span> 高确定性 (≥0.6): <b>{stats['high']}</b> 条</div>
-                <div style="margin:4px 0;"><span style="color:#f39c12;">■</span> 中等确定性 (0.3-0.6): <b>{stats['mid']}</b> 条</div>
-                <div style="margin:4px 0;"><span style="color:#e74c3c;">■</span> 低确定性/传闻 (<0.3): <b>{stats['low']}</b> 条</div>
+                <div style="margin:4px 0;"><span style="color:#27ae60;">HIGH</span> 高确定性 (>=0.6): <b>{stats['high']}</b> 条</div>
+                <div style="margin:4px 0;"><span style="color:#f39c12;">MID</span> 中等确定性 (0.3-0.6): <b>{stats['mid']}</b> 条</div>
+                <div style="margin:4px 0;"><span style="color:#e74c3c;">LOW</span> 低确定性/传闻 (<0.3): <b>{stats['low']}</b> 条</div>
                 <div style="margin:4px 0; color:#a6adc8;">总计: {stats['total']} 条新闻</div>
             </div>
         </div>
@@ -247,11 +258,10 @@ def score_news_to_html(news_list, filtered=False):
         source = item.get("source", "")
         title = item.get("title", "")
 
-        # 预测句子详情
         pred_details = ""
         if preds:
             pred_items = []
-            for p in preds[:3]:  # 最多显示3条
+            for p in preds[:3]:
                 ps = p.get("score", 0)
                 pt = p.get("text", "")[:60]
                 pc = score_to_color(ps)
@@ -277,13 +287,13 @@ def score_news_to_html(news_list, filtered=False):
 
     table_html = f"""
     <div style="background:#1e1e2e; border-radius:12px; padding:16px 20px; color:#cdd6f4;">
-        <h4 style="margin:0 0 12px 0;">📋 逐条评分明细</h4>
+        <h4 style="margin:0 0 12px 0;">Score List</h4>
         <table style="width:100%; border-collapse:collapse;">
             <tr style="background:#313244;">
                 <th style="padding:8px; text-align:left;">#</th>
-                <th style="padding:8px; text-align:left;">标题 / 来源</th>
-                <th style="padding:8px; text-align:left;">预测语句 & 单项评分</th>
-                <th style="padding:8px; text-align:center;">综合评分</th>
+                <th style="padding:8px; text-align:left;">Title / Source</th>
+                <th style="padding:8px; text-align:left;">Predictions & Scores</th>
+                <th style="padding:8px; text-align:center;">Score</th>
             </tr>
             {''.join(rows)}
         </table>
@@ -291,12 +301,12 @@ def score_news_to_html(news_list, filtered=False):
     """
 
     full_html = summary_html + table_html
-    status_line = f"📊 综合评分 {avg:.2f} | 高:{stats['high']} 中:{stats['mid']} 低:{stats['low']}"
+    status_line = f"Score {avg:.2f} | High:{stats['high']} Mid:{stats['mid']} Low:{stats['low']}"
     return full_html, status_line
 
 
 def get_news_with_score():
-    """Claw2打分按钮回调：采集新闻 → 打分 → 返回可视化HTML"""
+    """Claw2打分按钮回调：采集新闻 -> 打分 -> 返回可视化HTML"""
     try:
         news_df = get_macro_news()
         if hasattr(news_df, "to_dict"):
@@ -305,20 +315,39 @@ def get_news_with_score():
             news_list = news_df
 
         if not news_list:
-            return "<p>⚠️ 未获取到新闻数据。</p>"
+            return "<p>No news data.</p>"
 
         html, _ = score_news_to_html(news_list)
         return html
     except Exception as err:
-        return f"<p style='color:red;'>❌ 打分失败: {str(err)}</p>"
+        return f"<p style='color:red;'>Score failed: {str(err)}</p>"
+
 
 def refresh_market():
     """刷新市场数据，返回 DataFrame"""
     sh_close, sh_chg, sz_close, sz_chg = get_live_market_data()
+
+    def fmt_val(val):
+        """安全格式化数值"""
+        if val is None:
+            return "获取失败"
+        if isinstance(val, (int, float)):
+            return round(val, 2)
+        return str(val)
+
+    def fmt_chg(val):
+        """安全格式化涨跌幅"""
+        if val is None:
+            return "--"
+        if isinstance(val, (int, float)):
+            return f"{val:+.2f}%"
+        return str(val)
+
     return pd.DataFrame([
-        ["上证指数", sh_close, f"{sh_chg:.2f}%" if isinstance(sh_chg, (int, float)) else "--%"],
-        ["深证指数", sz_close, f"{sz_chg:.2f}%" if isinstance(sh_chg, (int, float)) else "--%"]
+        ["上证指数", fmt_val(sh_close), fmt_chg(sh_chg)],
+        ["深证指数", fmt_val(sz_close), fmt_chg(sz_chg)]
     ], columns=["指数", "最新价", "涨跌幅"])
+
 
 def run_daily_collection(use_mock, use_llm, selected_sources):
     """运行数据采集"""
@@ -328,17 +357,15 @@ def run_daily_collection(use_mock, use_llm, selected_sources):
         selected_sources=selected_sources
     )
     news_list = collector.collect()
-    # 保存到文件
     os.makedirs("data", exist_ok=True)
     with open("data/news.json", "w", encoding="utf-8") as f:
         json.dump({"date": datetime.now().strftime("%Y-%m-%d"), "news": news_list}, f)
     return news_list
 
+
 def collect_and_report(use_mock, use_llm, selected_sources, use_demo):
     """采集新闻并生成报告（支持演示模式）"""
-    # 演示模式：直接使用预设的 FALLBACK_NEWS
     if use_demo:
-        # 将 FALLBACK_NEWS 转换为标准格式
         news = []
         for i, item in enumerate(FALLBACK_NEWS):
             news.append({
@@ -356,21 +383,21 @@ def collect_and_report(use_mock, use_llm, selected_sources, use_demo):
                 "prediction_score": 0.0,
                 "impact_score": 0.0
             })
-        status_msg = f"✅ 演示模式，共 {len(news)} 条示例新闻"
+        status_msg = f"OK: demo mode, {len(news)} sample news"
     else:
         news = run_daily_collection(use_mock, use_llm, selected_sources)
         if not news:
-            return "❌ 无新闻", "采集失败，未获取到任何新闻", "", "<p style='color:red;'>无新闻数据可供打分</p>"
-        status_msg = f"✅ 采集完成，共 {len(news)} 条新闻"
+            return "No news", "Collection failed", "", "<p style='color:red;'>No news data for scoring</p>"
+        status_msg = f"OK: collected {len(news)} news items"
 
-    # 构建新闻列表 HTML 表格
+    # 构建新闻列表 HTML
     html_rows = []
     for idx, item in enumerate(news, 1):
         title = item.get('title', '')
         source = item.get('source', '')
         url = item.get('url', '')
         content = item.get('content', '')[:150]
-        link_tag = f'<a href="{url}" target="_blank">链接</a>' if url and url.startswith('http') else '无链接'
+        link_tag = f'<a href="{url}" target="_blank">link</a>' if url and url.startswith('http') else 'no link'
         html_rows.append(f"""
         <tr>
             <td>{idx}</td>
@@ -380,14 +407,14 @@ def collect_and_report(use_mock, use_llm, selected_sources, use_demo):
         </tr>
         """)
     news_table = f"""
-    <h3>📰 采集到的新闻列表（共 {len(news)} 条）</h3>
+    <h3>News List ({len(news)} items)</h3>
     <table border="1" cellpadding="5" style="border-collapse: collapse; width: 100%;">
-        <tr><th>#</th><th>标题 / 来源</th><th>链接</th><th>内容概览</th></tr>
+        <tr><th>#</th><th>Title / Source</th><th>Link</th><th>Content</th></tr>
         {''.join(html_rows)}
     </table>
     """
     report = generate_ai_report(news)
-    # Claw2 新闻打分（演示模式/采集模式都经过筛选，启用加成）
+    # Claw2 打分
     news_filtered = use_demo or use_llm
     score_html, score_status = score_news_to_html(news, filtered=news_filtered)
     # 保存报告
@@ -398,10 +425,11 @@ def collect_and_report(use_mock, use_llm, selected_sources, use_demo):
     scored_list, _ = score_news_list(news, filtered=news_filtered)
     with open(scored_file, "w", encoding="utf-8") as f:
         json.dump(scored_list, f, ensure_ascii=False, indent=2)
-    status_msg += f"\n📄 报告已保存至: {saved_path}"
-    status_msg += f"\n📊 打分日志: {scored_file}"
+    status_msg += f"\nReport saved: {saved_path}"
+    status_msg += f"\nScore log: {scored_file}"
     status_msg += f"\n{score_status}"
     return report, status_msg, news_table, score_html
+
 
 def run_full_analysis_with_score():
     """运行全部分析 + 评分"""
@@ -409,68 +437,289 @@ def run_full_analysis_with_score():
         final_report = run_full_analysis()
         score_result = score_finance_report(final_report)
         combined = final_report + "\n\n---\n\n" + score_result
-        status = "✅ 全部分析完成"
+        status = "OK: Full analysis done"
         return combined, status
     except Exception as e:
-        return f"❌ 分析失败: {str(e)}", f"❌ 错误: {str(e)}"
+        return f"Analysis failed: {str(e)}", f"Error: {str(e)}"
+
+
+# ========== 图表分析 Tab 回调 ==========
+
+def update_chart(stock_code: str, days: int, chart_type: str):
+    """根据股票代码和图表类型生成 Plotly 图表"""
+    if not stock_code or not stock_code.strip():
+        stock_code = "600519"
+
+    stock_code = stock_code.strip()
+    name_map = {
+        "600519": "贵州茅台", "000977": "浪潮信息", "002230": "科大讯飞",
+        "300750": "宁德时代", "688981": "中芯国际", "002594": "比亚迪",
+    }
+    stock_name = name_map.get(stock_code, stock_code)
+
+    chart_map = {
+        "Kline+MA+Volume": lambda: plot_kline(stock_code, days=days, stock_name=stock_name),
+        "K线图 + 均线 + 成交量": lambda: plot_kline(stock_code, days=days, stock_name=stock_name),
+        "MACD": lambda: plot_macd(stock_code, days=days, stock_name=stock_name),
+        "MACD 指标": lambda: plot_macd(stock_code, days=days, stock_name=stock_name),
+        "Volume Analysis": lambda: plot_volume_analysis(stock_code, days=days, stock_name=stock_name),
+        "量价分析": lambda: plot_volume_analysis(stock_code, days=days, stock_name=stock_name),
+        "Index Comparison": lambda: plot_index_overview(),
+        "大盘指数对比": lambda: plot_index_overview(),
+    }
+    factory = chart_map.get(chart_type, chart_map["Kline+MA+Volume"])
+    fig = factory()
+
+    return fig
+
+
+# ========== 智能问答 Tab 回调 ==========
+
+def chat_qa(message: str, history: list):
+    """处理用户问答消息"""
+    if not message or not message.strip():
+        return "", history
+
+    news_list = []
+    try:
+        if os.path.exists("data/news.json"):
+            with open("data/news.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and 'news' in data:
+                news_list = data['news']
+            elif isinstance(data, list):
+                news_list = data
+    except Exception:
+        pass
+
+    answer_text = qa_answer(message, news_list=news_list)
+
+    if history is None:
+        history = []
+    history.append((message, answer_text))
+    return "", history
+
+
+def clear_chat():
+    """清空对话历史"""
+    return [], []
+
+
+# ========== 历史报告 Tab 回调 ==========
+
+def list_history_reports():
+    """列出所有历史报告文件"""
+    reports_dir = "data/reports"
+    if not os.path.exists(reports_dir):
+        return "No historical reports yet", gr.Dropdown(choices=[])
+
+    report_files = sorted(
+        [f for f in os.listdir(reports_dir) if f.startswith("report_") and f.endswith(".md")],
+        reverse=True
+    )
+
+    if not report_files:
+        return "No historical reports yet", gr.Dropdown(choices=[])
+
+    preview_lines = [f"### {len(report_files)} historical reports\n"]
+    for i, fname in enumerate(report_files[:20], 1):
+        parts = fname.replace(".md", "").split("_")
+        date_str = parts[1] if len(parts) > 1 else "unknown"
+        preview_lines.append(f"{i}. **{date_str}** -- `{fname}`")
+
+    preview = "\n".join(preview_lines)
+    choices = report_files
+    return preview, gr.Dropdown(choices=choices, value=choices[0] if choices else None)
+
+
+def view_history_report(selected_file: str):
+    """查看选中的历史报告内容"""
+    if not selected_file:
+        return "Select a report from dropdown", ""
+
+    filepath = os.path.join("data/reports", selected_file)
+    if not os.path.exists(filepath):
+        return f"File not found: {selected_file}", ""
+
+    with open(filepath, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    return content, selected_file
 
 
 def create_ui():
-    with gr.Blocks(title="Claw 数字员工 - 每日科技股简报", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("# 🦞 Claw 数字员工 - 每日科技股简报系统")
-        gr.Markdown("基于 OpenClaw 架构 | 多源采集 | DeepSeek精筛 | 自动报告")
+    with gr.Blocks(title="Claw Digital Employee - Daily Tech Briefing", theme=gr.themes.Soft()) as demo:
+        gr.Markdown("# Claw Digital Employee - Daily Tech Stock Briefing")
+        gr.Markdown("OpenClaw | Multi-Source | DeepSeek Filter | Auto Report | Zero Token Cost")
 
-        with gr.Row():
-            with gr.Column(scale=1):
-                use_demo = gr.Checkbox(label="🎬 演示模式（使用示例数据）", value=True)
-                use_mock = gr.Checkbox(label="模拟采集（不访问真实数据源）", value=False)
-                use_llm = gr.Checkbox(label="DeepSeek 精筛", value=False)
-                sources = gr.CheckboxGroup(
-                    choices=["AKShare", "财联社", "华尔街见闻", "新浪科技", "36氪", "知乎日报"],
-                    label="数据源选择",
-                    value=["AKShare", "财联社", "华尔街见闻", "新浪科技", "36氪", "知乎日报"]
+        # ==============================
+        # Tab 1: Daily Briefing
+        # ==============================
+        with gr.Tab("Daily Briefing"):
+            with gr.Row():
+                with gr.Column(scale=1):
+                    use_demo = gr.Checkbox(label="Demo Mode (sample data)", value=True)
+                    use_mock = gr.Checkbox(label="Mock (no real data source)", value=False)
+                    use_llm = gr.Checkbox(label="DeepSeek Filter", value=False)
+                    sources = gr.CheckboxGroup(
+                        choices=["AKShare", "Wallstreetcn", "SinaFinance", "36kr"],
+                        label="Data Sources",
+                        value=["AKShare", "Wallstreetcn", "SinaFinance", "36kr"]
+                    )
+                    collect_btn = gr.Button("Generate Briefing", variant="primary")
+                    full_analysis_btn = gr.Button("Full 3-Agent Analysis + Score", variant="secondary")
+                    score_news_btn = gr.Button("Claw2 Score Only", variant="secondary")
+                    status_text = gr.Textbox(label="Status", lines=5)
+
+                with gr.Column(scale=1):
+                    gr.Markdown("### Market Overview")
+                    market_table = gr.Dataframe(
+                        headers=["Index", "Price", "Change"],
+                        value=[["SSE Index", "--", "--%"], ["SZSE Index", "--", "--%"]],
+                        interactive=False
+                    )
+                    refresh_btn = gr.Button("Refresh Market Data")
+
+            gr.Markdown("### AI Briefing")
+            report_output = gr.Markdown("Click 'Generate Briefing' to start")
+            news_html = gr.HTML("")
+
+            gr.Markdown("---")
+            gr.Markdown("### Claw2 News Sentiment Score")
+            score_html = gr.HTML("<p style='color:#888;'>Click buttons above to view scoring</p>")
+
+            collect_btn.click(
+                collect_and_report,
+                inputs=[use_mock, use_llm, sources, use_demo],
+                outputs=[report_output, status_text, news_html, score_html]
+            )
+            full_analysis_btn.click(
+                run_full_analysis_with_score,
+                outputs=[report_output, status_text]
+            )
+            score_news_btn.click(
+                get_news_with_score,
+                outputs=score_html
+            )
+            refresh_btn.click(refresh_market, outputs=market_table)
+
+        # ==============================
+        # Tab 2: Charts
+        # ==============================
+        with gr.Tab("Charts"):
+            gr.Markdown("### Interactive Technical Charts (Plotly)")
+            gr.Markdown("Enter stock code, select chart type and period.")
+
+            with gr.Row():
+                with gr.Column(scale=1):
+                    chart_stock = gr.Textbox(
+                        label="Stock Code",
+                        value="600519",
+                        placeholder="e.g. 600519, 000977, 688981"
+                    )
+                    chart_days = gr.Slider(
+                        label="Data Period (days)",
+                        minimum=20,
+                        maximum=180,
+                        value=60,
+                        step=10
+                    )
+                    chart_type = gr.Radio(
+                        choices=["Kline+MA+Volume", "MACD", "Volume Analysis", "Index Comparison"],
+                        label="Chart Type",
+                        value="Kline+MA+Volume"
+                    )
+                    chart_btn = gr.Button("Generate Chart", variant="primary")
+                    gr.Markdown("""
+                    **Common codes:**
+                    - `600519` Kweichow Moutai
+                    - `000977` Inspur
+                    - `688981` SMIC
+                    - `002230` iFlytek
+                    - `300750` CATL
+                    """)
+
+                with gr.Column(scale=2):
+                    chart_output = gr.Plot(label="Technical Chart")
+
+            chart_btn.click(
+                update_chart,
+                inputs=[chart_stock, chart_days, chart_type],
+                outputs=chart_output
+            )
+
+        # ==============================
+        # Tab 3: Q&A
+        # ==============================
+        with gr.Tab("Q&A"):
+            gr.Markdown("### AI Investment Assistant (Zero Token)")
+            gr.Markdown("Try: 'What to buy?', 'How is AI sector?', 'Analyze 688981'")
+
+            qa_chatbot = gr.Chatbot(
+                label="Conversation",
+                height=400,
+                bubble_full_width=False,
+            )
+            with gr.Row():
+                qa_input = gr.Textbox(
+                    label="Your Question",
+                    placeholder="e.g. What to buy today? / AI sector trend? / Analyze 688981",
+                    scale=4,
                 )
-                collect_btn = gr.Button("🔄 生成今日简报", variant="primary")
-                full_analysis_btn = gr.Button("📈 三大Agent全部分析 + 评分", variant="secondary")
-                score_news_btn = gr.Button("📊 Claw2 新闻独立打分", variant="secondary")
-                status_text = gr.Textbox(label="状态", lines=5)
+                with gr.Column(scale=1):
+                    qa_send = gr.Button("Send", variant="primary")
+                    qa_clear = gr.Button("Clear Chat")
 
-            with gr.Column(scale=1):
-                gr.Markdown("### 📊 市场概况")
-                market_table = gr.Dataframe(
-                    headers=["指数", "最新价", "涨跌幅"],
-                    value=[["上证指数", "--", "--%"], ["深证指数", "--", "--%"]],
-                    interactive=False
-                )
-                refresh_btn = gr.Button("🔄 刷新市场数据")
+            qa_send.click(
+                chat_qa,
+                inputs=[qa_input, qa_chatbot],
+                outputs=[qa_input, qa_chatbot]
+            )
+            qa_input.submit(
+                chat_qa,
+                inputs=[qa_input, qa_chatbot],
+                outputs=[qa_input, qa_chatbot]
+            )
+            qa_clear.click(
+                clear_chat,
+                outputs=[qa_input, qa_chatbot]
+            )
 
-        gr.Markdown("### 📋 AI 智能简报")
-        report_output = gr.Markdown("点击「生成今日简报」开始")
-        news_html = gr.HTML("")
+        # ==============================
+        # Tab 4: History
+        # ==============================
+        with gr.Tab("History"):
+            gr.Markdown("### Historical Reports")
+            gr.Markdown("Browse past daily briefing reports.")
 
-        gr.Markdown("---")
-        gr.Markdown("### 🦞 Claw2 新闻情绪评分")
-        score_html = gr.HTML("<p style='color:#888;'>点击「生成今日简报」或「Claw2独立打分」查看评分</p>")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    refresh_list_btn = gr.Button("Refresh List")
+                    report_list_md = gr.Markdown("Click 'Refresh List' to load...")
+                    report_selector = gr.Dropdown(
+                        label="Select Report",
+                        choices=[],
+                        interactive=True,
+                    )
 
-        # 绑定事件
-        collect_btn.click(
-            collect_and_report,
-            inputs=[use_mock, use_llm, sources, use_demo],
-            outputs=[report_output, status_text, news_html, score_html]
-        )
-        # 三大Agent全部分析按钮绑定
-        full_analysis_btn.click(
-            run_full_analysis_with_score,
-            outputs=[report_output, status_text]
-        )
-        # Claw2新闻独立打分按钮绑定
-        score_news_btn.click(
-            get_news_with_score,
-            outputs=score_html
-        )
-        refresh_btn.click(refresh_market, outputs=market_table)
+                with gr.Column(scale=2):
+                    history_report_title = gr.Markdown("")
+                    history_report_content = gr.Markdown(
+                        "Select a report from the dropdown to view.",
+                    )
+
+            refresh_list_btn.click(
+                list_history_reports,
+                outputs=[report_list_md, report_selector]
+            )
+            report_selector.change(
+                view_history_report,
+                inputs=report_selector,
+                outputs=[history_report_content, history_report_title]
+            )
 
     return demo
+
 
 if __name__ == "__main__":
     os.makedirs("data", exist_ok=True)

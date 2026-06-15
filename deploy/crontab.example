@@ -1,0 +1,16 @@
+# ============================================================
+# Claw 数字员工 - crontab 配置示例
+# 执行命令: crontab -e  然后将下面内容粘贴进去
+# ============================================================
+# 环境变量（按需修改路径）
+# PATH=/home/ubuntu/miniconda3/envs/claw/bin:/usr/bin:/bin
+# DEEPSEEK_API_KEY=your_api_key_here
+
+# 每个交易日 18:00 执行每日分析
+0 18 * * 1-5 cd /home/ubuntu/AI.financial.report && python run_daily.py >> logs/cron.log 2>&1
+
+# 或者如果 API key 在 .env 文件中：
+# 0 18 * * 1-5 cd /home/ubuntu/AI.financial.report && bash start.sh --daily >> logs/cron.log 2>&1
+
+# 每天早上 9:25（开盘前 5 分钟）快速采集新闻
+25 9 * * 1-5 cd /home/ubuntu/AI.financial.report && python run_daily.py --collect-only >> logs/cron_collect.log 2>&1

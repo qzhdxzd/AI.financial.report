@@ -22,7 +22,8 @@ class MarketAnalyzer:
         
         for news in news_list:
             is_fact = news.get('is_fact', False)
-            pred_sentences = news.get('predictive_sentences', [])
+            # 兼容 collector 输出的 'predictions' 与旧版 'predictive_sentences' 字段名
+            pred_sentences = news.get('predictions', news.get('predictive_sentences', []))
             
             # 基础分值
             base_score = 0

@@ -1,0 +1,20 @@
+[Unit]
+Description=Claw 数字员工 - 每日科技股简报系统
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/AI.financial.report
+Environment="PATH=/home/ubuntu/miniconda3/envs/claw/bin:/usr/bin:/bin"
+Environment="DEEPSEEK_API_KEY=your_deepseek_api_key_here"
+ExecStart=/home/ubuntu/miniconda3/envs/claw/bin/python app.py
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/ubuntu/AI.financial.report/logs/server.log
+StandardError=append:/home/ubuntu/AI.financial.report/logs/server_error.log
+
+[Install]
+WantedBy=multi-user.target

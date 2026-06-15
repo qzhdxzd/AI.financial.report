@@ -2,7 +2,7 @@
   "name": "tech_news_collector",
   "description": "采集科技板块财经新闻，用于每日股票简报",
   "version": "1.0.0",
-  "author": "你的学号",
+  "author": "启真湖底小纵队",
   "input_schema": {
     "type": "object",
     "properties": {

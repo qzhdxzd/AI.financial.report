@@ -1,0 +1,14 @@
+[Unit]
+Description=Claw 数字员工 - 每日分析定时器（交易日 18:00）
+Requires=claw-daily.service
+
+[Timer]
+# 每个交易日 18:00 执行每日分析
+OnCalendar=Mon..Fri 18:00
+# 如果错过了执行时间，在系统启动后 5 分钟内补执行
+Persistent=true
+# 随机延迟最多 5 分钟，避免与其他定时任务冲突
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
