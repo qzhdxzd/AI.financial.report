@@ -458,14 +458,15 @@ def update_chart(stock_code: str, days: int, chart_type: str):
     stock_name = name_map.get(stock_code, stock_code)
 
     chart_map = {
+        "K线图+均线+成交量": lambda: plot_kline(stock_code, days=days, stock_name=stock_name),
         "Kline+MA+Volume": lambda: plot_kline(stock_code, days=days, stock_name=stock_name),
         "K线图 + 均线 + 成交量": lambda: plot_kline(stock_code, days=days, stock_name=stock_name),
-        "MACD": lambda: plot_macd(stock_code, days=days, stock_name=stock_name),
         "MACD 指标": lambda: plot_macd(stock_code, days=days, stock_name=stock_name),
-        "Volume Analysis": lambda: plot_volume_analysis(stock_code, days=days, stock_name=stock_name),
+        "MACD": lambda: plot_macd(stock_code, days=days, stock_name=stock_name),
         "量价分析": lambda: plot_volume_analysis(stock_code, days=days, stock_name=stock_name),
-        "Index Comparison": lambda: plot_index_overview(),
+        "Volume Analysis": lambda: plot_volume_analysis(stock_code, days=days, stock_name=stock_name),
         "大盘指数对比": lambda: plot_index_overview(),
+        "Index Comparison": lambda: plot_index_overview(),
     }
     factory = chart_map.get(chart_type, chart_map["Kline+MA+Volume"])
     fig = factory()
@@ -476,7 +477,7 @@ def update_chart(stock_code: str, days: int, chart_type: str):
 # ========== 智能问答 Tab 回调 ==========
 
 def chat_qa(message: str, history: list):
-    """处理用户问答消息"""
+    """处理用户问答消息（兼容 Gradio messages 格式）"""
     if not message or not message.strip():
         return "", history
 
@@ -496,13 +497,15 @@ def chat_qa(message: str, history: list):
 
     if history is None:
         history = []
-    history.append((message, answer_text))
+    # Gradio messages 格式: [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
+    history.append({"role": "user", "content": message})
+    history.append({"role": "assistant", "content": answer_text})
     return "", history
 
 
 def clear_chat():
     """清空对话历史"""
-    return [], []
+    return [], None
 
 
 # ========== 历史报告 Tab 回调 ==========
@@ -548,45 +551,45 @@ def view_history_report(selected_file: str):
 
 
 def create_ui():
-    with gr.Blocks(title="Claw Digital Employee - Daily Tech Briefing", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("# Claw Digital Employee - Daily Tech Stock Briefing")
-        gr.Markdown("OpenClaw | Multi-Source | DeepSeek Filter | Auto Report | Zero Token Cost")
+    with gr.Blocks(title="Claw 数字员工 - 每日科技股简报", theme=gr.themes.Soft()) as demo:
+        gr.Markdown("# 🦞 Claw 数字员工 - 每日科技股简报系统")
+        gr.Markdown("基于 OpenClaw 架构 | 多源采集 | DeepSeek精筛 | 自动报告 | 零Token成本")
 
         # ==============================
-        # Tab 1: Daily Briefing
+        # Tab 1: 每日简报
         # ==============================
-        with gr.Tab("Daily Briefing"):
+        with gr.Tab("📊 每日简报"):
             with gr.Row():
                 with gr.Column(scale=1):
-                    use_demo = gr.Checkbox(label="Demo Mode (sample data)", value=True)
-                    use_mock = gr.Checkbox(label="Mock (no real data source)", value=False)
-                    use_llm = gr.Checkbox(label="DeepSeek Filter", value=False)
+                    use_demo = gr.Checkbox(label="🎬 演示模式（使用示例数据）", value=True)
+                    use_mock = gr.Checkbox(label="模拟采集（不访问真实数据源）", value=False)
+                    use_llm = gr.Checkbox(label="DeepSeek 精筛", value=False)
                     sources = gr.CheckboxGroup(
-                        choices=["AKShare", "Wallstreetcn", "SinaFinance", "36kr"],
-                        label="Data Sources",
-                        value=["AKShare", "Wallstreetcn", "SinaFinance", "36kr"]
+                        choices=["AKShare", "新浪财经", "华尔街见闻", "财联社", "36氪", "东方财富"],
+                        label="数据源选择",
+                        value=["AKShare", "新浪财经", "华尔街见闻", "财联社"]
                     )
-                    collect_btn = gr.Button("Generate Briefing", variant="primary")
-                    full_analysis_btn = gr.Button("Full 3-Agent Analysis + Score", variant="secondary")
-                    score_news_btn = gr.Button("Claw2 Score Only", variant="secondary")
-                    status_text = gr.Textbox(label="Status", lines=5)
+                    collect_btn = gr.Button("🔄 生成今日简报", variant="primary")
+                    full_analysis_btn = gr.Button("📈 三大Agent全部分析 + 评分", variant="secondary")
+                    score_news_btn = gr.Button("📊 Claw2 新闻独立打分", variant="secondary")
+                    status_text = gr.Textbox(label="运行状态", lines=5)
 
                 with gr.Column(scale=1):
-                    gr.Markdown("### Market Overview")
+                    gr.Markdown("### 📊 市场概况")
                     market_table = gr.Dataframe(
-                        headers=["Index", "Price", "Change"],
-                        value=[["SSE Index", "--", "--%"], ["SZSE Index", "--", "--%"]],
+                        headers=["指数", "最新价", "涨跌幅"],
+                        value=[["上证指数", "--", "--%"], ["深证指数", "--", "--%"]],
                         interactive=False
                     )
-                    refresh_btn = gr.Button("Refresh Market Data")
+                    refresh_btn = gr.Button("🔄 刷新市场数据")
 
-            gr.Markdown("### AI Briefing")
-            report_output = gr.Markdown("Click 'Generate Briefing' to start")
+            gr.Markdown("### 📋 AI 智能简报")
+            report_output = gr.Markdown("点击「生成今日简报」开始分析")
             news_html = gr.HTML("")
 
             gr.Markdown("---")
-            gr.Markdown("### Claw2 News Sentiment Score")
-            score_html = gr.HTML("<p style='color:#888;'>Click buttons above to view scoring</p>")
+            gr.Markdown("### 🦞 Claw2 新闻情绪评分")
+            score_html = gr.HTML("<p style='color:#888;'>点击上方按钮进行新闻采集与打分</p>")
 
             collect_btn.click(
                 collect_and_report,
@@ -604,43 +607,43 @@ def create_ui():
             refresh_btn.click(refresh_market, outputs=market_table)
 
         # ==============================
-        # Tab 2: Charts
+        # Tab 2: 图表分析
         # ==============================
-        with gr.Tab("Charts"):
-            gr.Markdown("### Interactive Technical Charts (Plotly)")
-            gr.Markdown("Enter stock code, select chart type and period.")
+        with gr.Tab("📈 图表分析"):
+            gr.Markdown("### 📈 交互式技术图表（Plotly）")
+            gr.Markdown("输入股票代码，选择图表类型和时间范围，即可生成交互式技术分析图。")
 
             with gr.Row():
                 with gr.Column(scale=1):
                     chart_stock = gr.Textbox(
-                        label="Stock Code",
+                        label="股票代码",
                         value="600519",
-                        placeholder="e.g. 600519, 000977, 688981"
+                        placeholder="输入6位代码，如 600519（茅台）、000977（浪潮）、688981（中芯）"
                     )
                     chart_days = gr.Slider(
-                        label="Data Period (days)",
+                        label="数据天数",
                         minimum=20,
                         maximum=180,
                         value=60,
                         step=10
                     )
                     chart_type = gr.Radio(
-                        choices=["Kline+MA+Volume", "MACD", "Volume Analysis", "Index Comparison"],
-                        label="Chart Type",
-                        value="Kline+MA+Volume"
+                        choices=["K线图+均线+成交量", "MACD 指标", "量价分析", "大盘指数对比"],
+                        label="图表类型",
+                        value="K线图+均线+成交量"
                     )
-                    chart_btn = gr.Button("Generate Chart", variant="primary")
+                    chart_btn = gr.Button("📊 生成图表", variant="primary")
                     gr.Markdown("""
-                    **Common codes:**
-                    - `600519` Kweichow Moutai
-                    - `000977` Inspur
-                    - `688981` SMIC
-                    - `002230` iFlytek
-                    - `300750` CATL
+                    **常用代码速查：**
+                    - `600519` 贵州茅台
+                    - `000977` 浪潮信息
+                    - `688981` 中芯国际
+                    - `002230` 科大讯飞
+                    - `300750` 宁德时代
                     """)
 
                 with gr.Column(scale=2):
-                    chart_output = gr.Plot(label="Technical Chart")
+                    chart_output = gr.Plot(label="技术分析图表")
 
             chart_btn.click(
                 update_chart,
@@ -649,26 +652,26 @@ def create_ui():
             )
 
         # ==============================
-        # Tab 3: Q&A
+        # Tab 3: 智能问答
         # ==============================
-        with gr.Tab("Q&A"):
-            gr.Markdown("### AI Investment Assistant (Zero Token)")
-            gr.Markdown("Try: 'What to buy?', 'How is AI sector?', 'Analyze 688981'")
+        with gr.Tab("💬 智能问答"):
+            gr.Markdown("### 💬 AI 投资助手（零 Token 成本）")
+            gr.Markdown("基于当日分析数据的规则匹配问答。试试问：「今天适合买什么？」「AI板块走势如何？」「分析一下688981」")
 
             qa_chatbot = gr.Chatbot(
-                label="Conversation",
+                label="对话记录",
                 height=400,
-                bubble_full_width=False,
+                type="messages",
             )
             with gr.Row():
                 qa_input = gr.Textbox(
-                    label="Your Question",
-                    placeholder="e.g. What to buy today? / AI sector trend? / Analyze 688981",
+                    label="输入问题",
+                    placeholder="例如：今天适合买什么？ / AI板块走势如何？ / 分析一下688981 / 今日总结",
                     scale=4,
                 )
                 with gr.Column(scale=1):
-                    qa_send = gr.Button("Send", variant="primary")
-                    qa_clear = gr.Button("Clear Chat")
+                    qa_send = gr.Button("💬 发送", variant="primary")
+                    qa_clear = gr.Button("🗑️ 清空对话")
 
             qa_send.click(
                 chat_qa,
@@ -686,18 +689,18 @@ def create_ui():
             )
 
         # ==============================
-        # Tab 4: History
+        # Tab 4: 历史报告
         # ==============================
-        with gr.Tab("History"):
-            gr.Markdown("### Historical Reports")
-            gr.Markdown("Browse past daily briefing reports.")
+        with gr.Tab("📁 历史报告"):
+            gr.Markdown("### 📁 历史每日简报浏览")
+            gr.Markdown("查看过去生成的每日分析报告，支持按日期追溯。")
 
             with gr.Row():
                 with gr.Column(scale=1):
-                    refresh_list_btn = gr.Button("Refresh List")
-                    report_list_md = gr.Markdown("Click 'Refresh List' to load...")
+                    refresh_list_btn = gr.Button("🔄 刷新报告列表")
+                    report_list_md = gr.Markdown("点击「刷新报告列表」加载...")
                     report_selector = gr.Dropdown(
-                        label="Select Report",
+                        label="选择报告",
                         choices=[],
                         interactive=True,
                     )
@@ -705,7 +708,7 @@ def create_ui():
                 with gr.Column(scale=2):
                     history_report_title = gr.Markdown("")
                     history_report_content = gr.Markdown(
-                        "Select a report from the dropdown to view.",
+                        "👈 请先点击「刷新报告列表」，然后从下拉菜单选择要查看的报告",
                     )
 
             refresh_list_btn.click(

@@ -805,13 +805,20 @@ class TechNewsCollector:
             print("无任何采集数据，使用保底模拟数据")
             return self._get_fallback_news()
 
-        # 筛选科技新闻
+        # 筛选科技新闻（本地关键词 + DeepSeek 双保险）
         print("\n--- 筛选科技新闻 ---")
         tech_news = []
         for idx, item in enumerate(all_news):
             if DEBUG_MODE and idx % 10 == 0:
                 print(f"  筛选进度: {idx+1}/{len(all_news)}")
-            is_tech, cat, sent = deepseek_classify(item['title'], item.get('content', ''))
+            # 先用本地关键词分类（作为保底）
+            is_tech_local, cat_local, sent_local = local_classify(item['title'], item.get('content', ''))
+            # 再用 DeepSeek 分类（如果有 API Key）
+            is_tech_ds, cat_ds, sent_ds = deepseek_classify(item['title'], item.get('content', ''))
+            # 任一判定为科技即保留（本地关键词优先，DeepSeek 补充）
+            is_tech = is_tech_local or is_tech_ds
+            cat = cat_local if is_tech_local else cat_ds
+            sent = sent_local if is_tech_local else sent_ds
             if is_tech:
                 uid = hashlib.md5(f"{item['title']}{item.get('source','')}".encode()).hexdigest()[:16]
                 tech_news.append({
